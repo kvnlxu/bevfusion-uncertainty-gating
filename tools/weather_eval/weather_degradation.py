@@ -48,6 +48,56 @@ def approximate_depth(xyz, projection, h, w):
   )
 
 
+def _as_4x4(mat):
+  arr = np.asarray(mat, dtype=np.float64)
+  if arr.shape == (4, 4):
+    return arr
+  if arr.shape == (3, 4):
+    out = np.eye(4, dtype=np.float64)
+    out[:3, :4] = arr
+    return out
+  raise ValueError(f"Expected (4, 4) or (3, 4) transform, got {arr.shape}")
+
+
+def _k_3x3(k):
+  arr = np.asarray(k, dtype=np.float64)
+  if arr.shape == (3, 3):
+    return arr
+  if arr.shape == (4, 4):
+    return arr[:3, :3]
+  raise ValueError(f"Expected (3, 3) or (4, 4) intrinsic matrix, got {arr.shape}")
+
+
+def _get_lidar2img_projections(results, num_views):
+  if "lidar2img" in results and results["lidar2img"] is not None:
+    projs = list(results["lidar2img"])
+    assert len(projs) == num_views, f"Expected {num_views} lidar2img matrices, got {len(projs)}"
+    return projs
+
+  intrinsics = results.get("cam_intrinsic") or results.get("camera_intrinsics")
+  if intrinsics is not None and len(intrinsics) == num_views:
+    if "lidar2cam" in results and results["lidar2cam"] is not None and len(results["lidar2cam"]) == num_views:
+      projs = []
+      for k, l2c in zip(intrinsics, results["lidar2cam"]):
+        ext34 = _as_4x4(l2c)[:3, :4]
+        projs.append(_k_3x3(k) @ ext34)
+      return projs
+
+    cam2ego = results.get("cam2ego") or results.get("camera2ego")
+    lidar2ego = results.get("lidar2ego")
+    if cam2ego is not None and lidar2ego is not None and len(cam2ego) == num_views:
+      l2e = _as_4x4(lidar2ego)
+      projs = []
+      for k, c2e in zip(intrinsics, cam2ego):
+        l2c = np.linalg.inv(_as_4x4(c2e)) @ l2e
+        projs.append(_k_3x3(k) @ l2c[:3, :4])
+      return projs
+
+  raise KeyError(
+      f"Missing 'lidar2img' and could not derive projections from available keys: {list(results.keys())}"
+  )
+
+
 def camera_weather(image, xyz, projection, weather, s, rng):
   if s == 0 or weather == "clean":
     return image.copy()
@@ -102,10 +152,8 @@ class WeatherDegradation(object):
   def transform(self, results):
     images = results["img"]
     points = results["points"]
-    projections = results["lidar2img"]
-    assert len(images) == len(projections) == 6, (
-        "Expected six calibrated views"
-    )
+    assert len(images) == 6, "Expected six camera views"
+    projections = _get_lidar2img_projections(results, len(images))
 
     xyz = points.tensor[:, :3].detach().cpu().numpy()
     sample = str(
