@@ -5,6 +5,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from PIL import Image
 from scipy.ndimage import distance_transform_edt
 import torch
 
@@ -14,6 +15,17 @@ def rng_for(seed, sample, stream):
   return np.random.default_rng(
       int.from_bytes(hashlib.sha256(key).digest()[:8], "little")
   )
+
+
+def _to_numpy_image(img):
+  if isinstance(img, Image.Image):
+    return np.asarray(img)
+  if isinstance(img, torch.Tensor):
+    arr = img.detach().cpu().numpy()
+    if arr.ndim == 3 and arr.shape[0] in (1, 3):
+      arr = np.transpose(arr, (1, 2, 0))
+    return arr
+  return np.asarray(img)
 
 
 def approximate_depth(xyz, projection, h, w):
@@ -71,12 +83,18 @@ def _k_3x3(k):
 def _get_lidar2img_projections(results, num_views):
   if "lidar2img" in results and results["lidar2img"] is not None:
     projs = list(results["lidar2img"])
-    assert len(projs) == num_views, f"Expected {num_views} lidar2img matrices, got {len(projs)}"
+    assert len(projs) == num_views, (
+        f"Expected {num_views} lidar2img matrices, got {len(projs)}"
+    )
     return projs
 
   intrinsics = results.get("cam_intrinsic") or results.get("camera_intrinsics")
   if intrinsics is not None and len(intrinsics) == num_views:
-    if "lidar2cam" in results and results["lidar2cam"] is not None and len(results["lidar2cam"]) == num_views:
+    if (
+        "lidar2cam" in results
+        and results["lidar2cam"] is not None
+        and len(results["lidar2cam"]) == num_views
+    ):
       projs = []
       for k, l2c in zip(intrinsics, results["lidar2cam"]):
         ext34 = _as_4x4(l2c)[:3, :4]
@@ -94,15 +112,18 @@ def _get_lidar2img_projections(results, num_views):
       return projs
 
   raise KeyError(
-      f"Missing 'lidar2img' and could not derive projections from available keys: {list(results.keys())}"
+      "Missing 'lidar2img' and could not derive projections from available"
+      f" keys: {list(results.keys())}"
   )
 
 
 def camera_weather(image, xyz, projection, weather, s, rng):
+  img_arr = _to_numpy_image(image)
+  out_dtype = img_arr.dtype if np.issubdtype(img_arr.dtype, np.floating) else np.uint8
   if s == 0 or weather == "clean":
-    return image.copy()
-  h, w = image.shape[:2]
-  x = image.astype(np.float32)
+    return img_arr.copy()
+  h, w = img_arr.shape[:2]
+  x = img_arr.astype(np.float32)
   if weather == "fog":
     d = approximate_depth(xyz, projection, h, w)
     t = np.exp(-0.065 * s * d)[..., None]
@@ -113,7 +134,9 @@ def camera_weather(image, xyz, projection, weather, s, rng):
     n = int(0.0015 * h * w * s)
     for u, v in zip(rng.integers(0, w, n), rng.integers(0, h, n)):
       length = int(rng.integers(12, 32))
-      cv2.line(mask, (int(u), int(v)), (int(u + length // 4), int(v + length)), 255, 1)
+      cv2.line(
+          mask, (int(u), int(v)), (int(u + length // 4), int(v + length)), 255, 1
+      )
     a = cv2.GaussianBlur(mask, (3, 3), 0).astype(np.float32)[..., None] / 255 * 0.65
     x = x * (1 - a) + 205 * a
   elif weather == "snow":
@@ -124,7 +147,7 @@ def camera_weather(image, xyz, projection, weather, s, rng):
       cv2.circle(mask, (int(u), int(v)), int(rng.integers(1, 6)), 255, -1)
     a = cv2.GaussianBlur(mask, (5, 5), 0).astype(np.float32)[..., None] / 255 * 0.85
     x = x * (1 - a) + 255 * a
-  return np.clip(x, 0, 255).astype(image.dtype)
+  return np.clip(x, 0, 255).astype(out_dtype)
 
 
 def lidar_keep(xyz, weather, s, rng):
@@ -150,7 +173,8 @@ class WeatherDegradation(object):
     self.debug_dir = Path(debug_dir) if debug_dir else None
 
   def transform(self, results):
-    images = results["img"]
+    raw_images = results["img"]
+    images = [_to_numpy_image(im) for im in raw_images]
     points = results["points"]
     assert len(images) == 6, "Expected six camera views"
     projections = _get_lidar2img_projections(results, len(images))
