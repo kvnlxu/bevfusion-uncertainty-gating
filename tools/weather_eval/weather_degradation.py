@@ -84,6 +84,8 @@ def lidar_keep(xyz, weather, s, rng):
   beta = {"fog": 0.045, "rain": 0.018, "snow": 0.030}[weather]
   p = np.exp(-beta * s * r)
   return rng.random(len(xyz)) < p
+
+
 @PIPELINES.register_module()
 class WeatherDegradation(object):
 
@@ -163,5 +165,6 @@ class WeatherDegradation(object):
       )
       (self.debug_dir / "stats.json").write_text(json.dumps(stats, indent=2))
     return results
-    def __call__(self, results):
-        return self.transform(results)
+
+  def __call__(self, results):
+    return self.transform(results)
