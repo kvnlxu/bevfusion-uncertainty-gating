@@ -42,6 +42,20 @@ def parse_args():
     return parser.parse_args()
 
 
+def _deep_merge(base, override):
+    if isinstance(base, Mapping) and isinstance(override, Mapping):
+        merged = {k: _deep_merge(v, v) for k, v in base.items()}
+        for k, v in override.items():
+            if k in merged and isinstance(merged[k], Mapping) and isinstance(v, Mapping):
+                merged[k] = _deep_merge(merged[k], v)
+            else:
+                merged[k] = _deep_merge({}, v) if isinstance(v, Mapping) else v
+        return merged
+    if isinstance(override, list):
+        return [_deep_merge({}, x) if isinstance(x, Mapping) else x for x in override]
+    return override
+
+
 def _lookup_path(root, expr_head):
     m = re.match(r"^([A-Za-z0-9_.]+)(\[[^\]]+\])?$", expr_head.strip())
     if not m:
@@ -139,7 +153,16 @@ def main():
     dest = Path(args.output_dir)
     dest.mkdir(parents=True, exist_ok=True)
 
-    raw_cfg = Config.fromfile(args.base_config)._cfg_dict
+    base_path = Path(args.base_config)
+    default_yaml = Path("configs/default.yaml")
+    if base_path.suffix == ".yaml" and default_yaml.exists() and base_path.resolve() != default_yaml.resolve():
+        raw_cfg = _deep_merge(
+            Config.fromfile(str(default_yaml))._cfg_dict,
+            Config.fromfile(str(base_path))._cfg_dict,
+        )
+    else:
+        raw_cfg = Config.fromfile(str(base_path))._cfg_dict
+
     if args.data_root:
         raw_cfg["dataset_root"] = args.data_root
     resolved_dict = _resolve_all(raw_cfg)
