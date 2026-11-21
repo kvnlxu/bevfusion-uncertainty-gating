@@ -28,6 +28,18 @@ def _to_numpy_image(img):
   return np.asarray(img)
 
 
+def _restore_image_type(arr, orig_img):
+  uint8_arr = np.clip(arr, 0, 255).astype(np.uint8)
+  if isinstance(orig_img, Image.Image):
+    return Image.fromarray(uint8_arr)
+  if isinstance(orig_img, torch.Tensor):
+    t = torch.from_numpy(uint8_arr)
+    if orig_img.ndim == 3 and orig_img.shape[0] in (1, 3):
+      t = t.permute(2, 0, 1).contiguous()
+    return t.to(dtype=orig_img.dtype, device=orig_img.device)
+  return arr
+
+
 def approximate_depth(xyz, projection, h, w):
   # Project LiDAR into original camera pixel coordinates before ImageAug3D.
   p = np.asarray(projection, dtype=np.float64)
@@ -119,7 +131,9 @@ def _get_lidar2img_projections(results, num_views):
 
 def camera_weather(image, xyz, projection, weather, s, rng):
   img_arr = _to_numpy_image(image)
-  out_dtype = img_arr.dtype if np.issubdtype(img_arr.dtype, np.floating) else np.uint8
+  out_dtype = (
+      img_arr.dtype if np.issubdtype(img_arr.dtype, np.floating) else np.uint8
+  )
   if s == 0 or weather == "clean":
     return img_arr.copy()
   h, w = img_arr.shape[:2]
@@ -211,7 +225,9 @@ class WeatherDegradation(object):
     results["points"] = points[
         torch.as_tensor(keep, device=points.tensor.device)
     ]
-    results["img"] = changed
+    results["img"] = [
+        _restore_image_type(c, orig) for c, orig in zip(changed, raw_images)
+    ]
 
     if self.debug_dir:
       self.debug_dir.mkdir(parents=True, exist_ok=True)
