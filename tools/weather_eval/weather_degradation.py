@@ -1,10 +1,9 @@
+from mmdet.datasets.builder import PIPELINES
 import hashlib
 import json
 from pathlib import Path
 
 import cv2
-from mmcv.transforms import BaseTransform
-from mmdet3d.registry import TRANSFORMS
 import numpy as np
 from scipy.ndimage import distance_transform_edt
 import torch
@@ -85,10 +84,8 @@ def lidar_keep(xyz, weather, s, rng):
   beta = {"fog": 0.045, "rain": 0.018, "snow": 0.030}[weather]
   p = np.exp(-beta * s * r)
   return rng.random(len(xyz)) < p
-
-
-@TRANSFORMS.register_module()
-class WeatherDegradation(BaseTransform):
+@PIPELINES.register_module()
+class WeatherDegradation(object):
 
   def __init__(
       self, weather="clean", severity=0.0, seed=42, debug_dir=None
@@ -166,3 +163,5 @@ class WeatherDegradation(BaseTransform):
       )
       (self.debug_dir / "stats.json").write_text(json.dumps(stats, indent=2))
     return results
+    def __call__(self, results):
+        return self.transform(results)
