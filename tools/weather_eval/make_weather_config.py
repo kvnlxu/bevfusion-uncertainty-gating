@@ -75,6 +75,14 @@ def _deep_merge(base, override):
     return [_deep_merge({}, x) if isinstance(x, Mapping) else x for x in override]
   return override
 
+def _parse_slice(raw_idx: str) -> slice:
+  parts = [p.strip() for p in raw_idx.split(":")]
+  if len(parts) not in (2, 3):
+    raise ValueError(f"Unsupported slice expression: {raw_idx}")
+  bounds = [None if p == "" else int(p) for p in parts]
+  while len(bounds) < 3:
+    bounds.append(None)
+  return slice(bounds[0], bounds[1], bounds[2])
 
 def _lookup_path(root, expr_head):
   m = re.match(r"^([A-Za-z0-9_.]+)(\[[^\]]+\])?$", expr_head.strip())
@@ -90,15 +98,11 @@ def _lookup_path(root, expr_head):
   if m.group(2):
     raw_idx = m.group(2)[1:-1].strip()
     if ":" in raw_idx:
-      slc_args = ",".join(
-          s.strip() if s.strip() else "None" for s in raw_idx.split(":")
-      )
-      idx_val = ast.literal_eval(f"slice({slc_args})")
+      idx_val = _parse_slice(raw_idx)
     else:
       idx_val = ast.literal_eval(raw_idx)
     cur = cur[idx_val]
   return cur
-
 
 def _collect_refs(expr, root):
   names = set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", expr))
@@ -107,7 +111,6 @@ def _collect_refs(expr, root):
     if name in root:
       env[name] = root[name]
   return env
-
 
 def _eval_expr(expr, root):
   expr = expr.strip()
