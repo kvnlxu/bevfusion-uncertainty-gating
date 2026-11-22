@@ -5,21 +5,24 @@ import sys
 from mmcv import Config
 from mmdet3d.datasets import build_dataset
 from mmdet3d.datasets.pipelines.transforms_3d import PointsRangeFilter
-import numpy as np
+import torch
 
 
 class _DummyRadarPoints:
   """Stand-in for radar when `results['radar']` is a raw dict or None."""
 
   def __init__(self, n=0):
-    self._n = n
+    self.tensor = torch.zeros((n, 0), dtype=torch.float32)
 
   def in_range_bev(self, _pc_range):
-    return np.ones(self._n, dtype=bool)
+    return torch.ones(len(self.tensor), dtype=torch.bool)
+
+  def __getitem__(self, _idx):
+    return self
 
 
 def patch_points_range_filter():
-  """Prevent AttributeError when `results['radar']` is a dict or None."""
+  """Prevent AttributeError/TypeError when `results['radar']` is a dict or None."""
   orig_call = PointsRangeFilter.__call__
 
   def safe_call(self, results):
