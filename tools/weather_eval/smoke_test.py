@@ -5,22 +5,37 @@ import sys
 from mmcv import Config
 from mmdet3d.datasets import build_dataset
 from mmdet3d.datasets.pipelines.transforms_3d import PointsRangeFilter
+import numpy as np
+
+
+class _DummyRadarPoints:
+  """Stand-in for radar when `results['radar']` is a raw dict or None."""
+
+  def __init__(self, n=0):
+    self._n = n
+
+  def in_range_bev(self, _pc_range):
+    return np.ones(self._n, dtype=bool)
 
 
 def patch_points_range_filter():
-  """Avoid calling .in_range_bev() when `results['radar']` is a raw dict."""
+  """Prevent AttributeError when `results['radar']` is a dict or None."""
   orig_call = PointsRangeFilter.__call__
 
   def safe_call(self, results):
-    radar = results.get("radar", None)
-    had_dict_radar = isinstance(radar, dict)
-    if had_dict_radar:
-      results["radar"] = None
+    had_key = "radar" in results
+    orig_radar = results.get("radar", None)
+    needs_dummy = orig_radar is None or isinstance(orig_radar, dict)
+    if needs_dummy:
+      results["radar"] = _DummyRadarPoints(0)
     try:
       return orig_call(self, results)
     finally:
-      if had_dict_radar and results.get("radar") is None:
-        results["radar"] = radar
+      if needs_dummy:
+        if had_key:
+          results["radar"] = orig_radar
+        else:
+          results.pop("radar", None)
 
   PointsRangeFilter.__call__ = safe_call
 
