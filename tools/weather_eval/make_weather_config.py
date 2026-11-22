@@ -1,8 +1,9 @@
 import argparse
 import ast
 from collections.abc import Mapping
-import re
 from pathlib import Path
+import re
+
 from mmcv import Config
 
 
@@ -198,6 +199,29 @@ def _find_load_insert_idx(pipeline):
   return insert_idx
 
 
+def _load_merged_yaml(base_path: Path) -> dict:
+  if base_path.suffix != ".yaml":
+    return Config.fromfile(str(base_path))._cfg_dict
+
+  candidates = [Path("configs/default.yaml")]
+  parts = base_path.parts
+  if "configs" in parts:
+    cfg_idx = parts.index("configs")
+    # Walk prefix directories under configs/, e.g. configs/nuscenes/default.yaml,
+    # configs/nuscenes/det/default.yaml, ...
+    for end_idx in range(cfg_idx + 2, len(parts)):
+      prefix_dir = Path(*parts[:end_idx])
+      candidate = prefix_dir / "default.yaml"
+      if candidate not in candidates:
+        candidates.append(candidate)
+
+  merged = {}
+  for cand in candidates:
+    if cand.exists() and cand.resolve() != base_path.resolve():
+      merged = _deep_merge(merged, Config.fromfile(str(cand))._cfg_dict)
+  return _deep_merge(merged, Config.fromfile(str(base_path))._cfg_dict)
+
+
 def main():
   args = parse_args()
   if not (0.0 <= args.severity <= 1.0):
@@ -207,18 +231,7 @@ def main():
   dest.mkdir(parents=True, exist_ok=True)
 
   base_path = Path(args.base_config)
-  default_yaml = Path("configs/default.yaml")
-  if (
-      base_path.suffix == ".yaml"
-      and default_yaml.exists()
-      and base_path.resolve() != default_yaml.resolve()
-  ):
-    raw_cfg = _deep_merge(
-        Config.fromfile(str(default_yaml))._cfg_dict,
-        Config.fromfile(str(base_path))._cfg_dict,
-    )
-  else:
-    raw_cfg = Config.fromfile(str(base_path))._cfg_dict
+  raw_cfg = _load_merged_yaml(base_path)
 
   if args.data_root:
     raw_cfg["dataset_root"] = args.data_root
