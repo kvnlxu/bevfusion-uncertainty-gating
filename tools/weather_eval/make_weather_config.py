@@ -100,6 +100,15 @@ def _lookup_path(root, expr_head):
   return cur
 
 
+def _collect_refs(expr, root):
+  names = set(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", expr))
+  env = {}
+  for name in names:
+    if name in root:
+      env[name] = root[name]
+  return env
+
+
 def _eval_expr(expr, root):
   expr = expr.strip()
   if "+" in expr and ('"' in expr or "'" in expr):
@@ -113,6 +122,12 @@ def _eval_expr(expr, root):
       else:
         out.append(str(_lookup_path(root, p)))
     return "".join(out)
+
+  # Handle list literals and simple arithmetic expressions like [image_size[0] // 8, image_size[1] // 8]
+  if expr.startswith("[") or any(op in expr for op in (" // ", " + ", " - ", " * ", " / ", "//")):
+    env = _collect_refs(expr, root)
+    return eval(expr, {"__builtins__": {}}, env)
+
   return _lookup_path(root, expr)
 
 
