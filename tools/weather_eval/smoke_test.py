@@ -22,23 +22,14 @@ class _DummyRadarPoints:
 
 
 def patch_points_range_filter():
-  """Prevent AttributeError/TypeError when `results['radar']` is a dict or None."""
+  """Keep a point-like object on dict/None `radar` for downstream formatting."""
   orig_call = PointsRangeFilter.__call__
 
   def safe_call(self, results):
-    had_key = "radar" in results
     orig_radar = results.get("radar", None)
-    needs_dummy = orig_radar is None or isinstance(orig_radar, dict)
-    if needs_dummy:
+    if orig_radar is None or isinstance(orig_radar, dict):
       results["radar"] = _DummyRadarPoints(0)
-    try:
-      return orig_call(self, results)
-    finally:
-      if needs_dummy:
-        if had_key:
-          results["radar"] = orig_radar
-        else:
-          results.pop("radar", None)
+    return orig_call(self, results)
 
   PointsRangeFilter.__call__ = safe_call
 
