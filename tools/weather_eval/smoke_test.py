@@ -4,34 +4,6 @@ import sys
 
 from mmcv import Config
 from mmdet3d.datasets import build_dataset
-from mmdet3d.datasets.pipelines.transforms_3d import PointsRangeFilter
-import torch
-
-
-class _DummyRadarPoints:
-  """Stand-in for radar when `results['radar']` is a raw dict or None."""
-
-  def __init__(self, n=0):
-    self.tensor = torch.zeros((n, 0), dtype=torch.float32)
-
-  def in_range_bev(self, _pc_range):
-    return torch.ones(len(self.tensor), dtype=torch.bool)
-
-  def __getitem__(self, _idx):
-    return self
-
-
-def patch_points_range_filter():
-  """Keep a point-like object on dict/None `radar` for downstream formatting."""
-  orig_call = PointsRangeFilter.__call__
-
-  def safe_call(self, results):
-    orig_radar = results.get("radar", None)
-    if orig_radar is None or isinstance(orig_radar, dict):
-      results["radar"] = _DummyRadarPoints(0)
-    return orig_call(self, results)
-
-  PointsRangeFilter.__call__ = safe_call
 
 
 def build_smoke_dataset(config_path: str, drop_bev_seg: bool = True):
@@ -77,7 +49,6 @@ def main():
   )
   args = parser.parse_args()
 
-  patch_points_range_filter()
   ds = build_smoke_dataset(args.config, drop_bev_seg=not args.keep_bev_seg)
   print(f"Dataset built: {type(ds)} | len: {len(ds)}")
 

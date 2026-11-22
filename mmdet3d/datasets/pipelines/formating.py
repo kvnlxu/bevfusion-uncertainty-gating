@@ -52,8 +52,11 @@ class DefaultFormatBundle3D:
             assert isinstance(results["points"], BasePoints)
             results["points"] = DC(results["points"].tensor)
 
-        if "radar" in results:
-            results["radar"] = DC(results["radar"].tensor)
+        if 'radar' in results:
+            if results['radar'] is not None and hasattr(results['radar'], 'tensor'):
+                results['radar'] = DC(results['radar'].tensor)
+            else:
+                results.pop('radar', None)
 
         for key in ["voxels", "coors", "voxel_centers", "num_points"]:
             if key not in results:
