@@ -173,17 +173,35 @@ def lidar_keep(xyz, weather, s, rng):
   return rng.random(len(xyz)) < p
 
 
+MODALITIES = ("both", "camera", "lidar")
+
+
 @PIPELINES.register_module()
 class WeatherDegradation(object):
+  """Synthetic weather for nuScenes camera images and LiDAR points.
+
+  Args:
+    weather: "clean", "fog", "rain" or "snow".
+    severity: Strength in [0, 1]; 0 is a no-op (clean baseline).
+    seed: Base seed; per-sample RNG streams are derived from it.
+    modality: Which sensors to degrade: "both" (default), "camera" only or
+      "lidar" only. Single-sensor runs isolate which modality drives the
+      robustness cliff.
+    debug_dir: If set, write degraded images, point clouds and stats.json.
+  """
 
   def __init__(
-      self, weather="clean", severity=0.0, seed=42, debug_dir=None
+      self, weather="clean", severity=0.0, seed=42, modality="both",
+      debug_dir=None
   ):
     if weather not in ("clean", "fog", "rain", "snow") or not 0 <= severity <= 1:
       raise ValueError("Invalid weather or severity")
+    if modality not in MODALITIES:
+      raise ValueError(f"modality must be one of {MODALITIES}, got {modality!r}")
     self.weather = weather
     self.s = float(severity)
     self.seed = int(seed)
+    self.modality = modality
     self.debug_dir = Path(debug_dir) if debug_dir else None
 
   def transform(self, results):
@@ -197,23 +215,31 @@ class WeatherDegradation(object):
     sample = str(
         results.get("token") or results.get("sample_idx") or results["img_path"]
     )
-    changed = [
-        camera_weather(
-            im,
-            xyz,
-            p,
-            self.weather,
-            self.s,
-            rng_for(self.seed, sample, f"{self.weather}-cam-{i}"),
-        )
-        for i, (im, p) in enumerate(zip(images, projections))
-    ]
-    keep = lidar_keep(
-        xyz,
-        self.weather,
-        self.s,
-        rng_for(self.seed, sample, f"{self.weather}-lidar"),
-    )
+    # RNG streams are keyed by sample and sensor only, so the camera-only and
+    # lidar-only runs apply exactly the same corruption as the "both" run.
+    if self.modality in ("both", "camera"):
+      changed = [
+          camera_weather(
+              im,
+              xyz,
+              p,
+              self.weather,
+              self.s,
+              rng_for(self.seed, sample, f"{self.weather}-cam-{i}"),
+          )
+          for i, (im, p) in enumerate(zip(images, projections))
+      ]
+    else:
+      changed = [im.copy() for im in images]
+    if self.modality in ("both", "lidar"):
+      keep = lidar_keep(
+          xyz,
+          self.weather,
+          self.s,
+          rng_for(self.seed, sample, f"{self.weather}-lidar"),
+      )
+    else:
+      keep = np.ones(len(xyz), dtype=bool)
 
     if self.s == 0 or self.weather == "clean":
       assert (
@@ -243,6 +269,7 @@ class WeatherDegradation(object):
           weather=self.weather,
           severity=self.s,
           seed=self.seed,
+          modality=self.modality,
           clean_points=len(xyz),
           retained_points=int(keep.sum()),
           retained_fraction=float(keep.mean()) if len(keep) else 0.0,

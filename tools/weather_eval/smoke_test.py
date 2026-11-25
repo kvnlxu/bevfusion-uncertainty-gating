@@ -27,6 +27,40 @@ def build_smoke_dataset(config_path: str, drop_bev_seg: bool = True):
   return build_dataset(ds_cfg)
 
 
+def check_model(config_path: str, checkpoint: str):
+  """Build the model from the config and compare it with the checkpoint.
+
+  Catches configs whose architecture does not match the checkpoint (wrong
+  base config, missing fuser or camera backbone) without needing a GPU.
+  """
+  import torch
+  from mmdet3d.models import build_model
+
+  cfg = Config.fromfile(config_path)
+  cfg.model.pretrained = None
+  cfg.model.train_cfg = None
+  model = build_model(cfg.model, test_cfg=cfg.get("test_cfg"))
+  print(f"Model built: {type(model).__name__} | fuser: {type(model.fuser).__name__}")
+
+  ckpt = torch.load(checkpoint, map_location="cpu")
+  ckpt_sd = ckpt.get("state_dict", ckpt)
+  model_sd = model.state_dict()
+  missing = sorted(set(model_sd) - set(ckpt_sd))
+  unexpected = sorted(set(ckpt_sd) - set(model_sd))
+  mismatched = sorted(
+      k for k in set(model_sd) & set(ckpt_sd)
+      if tuple(model_sd[k].shape) != tuple(ckpt_sd[k].shape)
+  )
+  for name, keys in (("missing", missing), ("unexpected", unexpected),
+                     ("shape-mismatched", mismatched)):
+    print(f"Checkpoint {name} keys: {len(keys)}")
+    for k in keys[:10]:
+      print(f"  - {k}")
+  if missing or unexpected or mismatched:
+    raise SystemExit("Config does not match checkpoint; see keys above.")
+  print("Checkpoint matches model.")
+
+
 def main():
   parser = argparse.ArgumentParser(
       description="Run single-sample smoke test for WeatherDegradation pipeline."
@@ -47,7 +81,15 @@ def main():
       action="store_true",
       help="Keep LoadBEVSegmentation and gt_masks_bev if map expansion JSONs exist.",
   )
+  parser.add_argument(
+      "--checkpoint",
+      default=None,
+      help="Also build the model and check it against this checkpoint.",
+  )
   args = parser.parse_args()
+
+  if args.checkpoint:
+    check_model(args.config, args.checkpoint)
 
   ds = build_smoke_dataset(args.config, drop_bev_seg=not args.keep_bev_seg)
   print(f"Dataset built: {type(ds)} | len: {len(ds)}")

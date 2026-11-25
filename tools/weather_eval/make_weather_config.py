@@ -7,12 +7,26 @@ import re
 from mmcv import Config
 
 
+# The released camera+lidar BEVFusion detection checkpoint was trained with this
+# leaf config (Swin-T camera backbone, ConvFuser, 0.075 m voxels). Its parent
+# camera+lidar/default.yaml has no camera backbone and no fuser, so it does not
+# describe a buildable model.
+DEFAULT_BASE_CONFIG = (
+    "configs/nuscenes/det/transfusion/secfpn/camera+lidar/swint_v0p075/convfuser.yaml"
+)
+
+
 def parse_args():
   parser = argparse.ArgumentParser(
       description="Generate weather-degraded BEVFusion config."
   )
   parser.add_argument(
-      "--base-config", required=True, help="Path to base MMDet3D/BEVFusion config"
+      "--base-config",
+      default=DEFAULT_BASE_CONFIG,
+      help=(
+          "Leaf BEVFusion config matching the checkpoint "
+          f"(default: {DEFAULT_BASE_CONFIG})"
+      ),
   )
   parser.add_argument(
       "--output-dir", required=True, help="Directory for generated config & artifacts"
@@ -28,6 +42,12 @@ def parse_args():
   )
   parser.add_argument(
       "--seed", type=int, default=42, help="Random seed for degradation"
+  )
+  parser.add_argument(
+      "--modality",
+      choices=["both", "camera", "lidar"],
+      default="both",
+      help="Which sensors to degrade (default: both)",
   )
   parser.add_argument(
       "--mode",
@@ -240,6 +260,27 @@ def _load_merged_yaml(base_path: Path) -> dict:
   return _deep_merge(merged, Config.fromfile(str(base_path))._cfg_dict)
 
 
+def _check_model(cfg):
+  """Fail early if the resolved config cannot be the camera+lidar fusion model."""
+  model = cfg.get("model") or {}
+  encoders = model.get("encoders") or {}
+  problems = []
+  if not model.get("fuser"):
+    problems.append("model.fuser is null")
+  camera = encoders.get("camera") or {}
+  if camera and not camera.get("backbone"):
+    problems.append("model.encoders.camera has no backbone")
+  if not encoders.get("lidar"):
+    problems.append("model.encoders.lidar is missing")
+  if problems:
+    raise ValueError(
+        "Base config does not describe the camera+lidar fusion model ("
+        + "; ".join(problems)
+        + "). Use a leaf config such as "
+        + DEFAULT_BASE_CONFIG
+    )
+
+
 def main():
   args = parse_args()
   if not (0.0 <= args.severity <= 1.0):
@@ -255,6 +296,7 @@ def main():
     raw_cfg["dataset_root"] = args.data_root
   resolved_dict = _resolve_all(raw_cfg)
   cfg = Config(resolved_dict)
+  _check_model(cfg)
 
   imports = dict(cfg.get("custom_imports") or {})
   names = imports.get("imports", [])
@@ -269,6 +311,7 @@ def main():
       weather=args.weather,
       severity=float(args.severity),
       seed=int(args.seed),
+      modality=args.modality,
       debug_dir=str(dest / "inputs") if args.mode == "smoke" else None,
   )
 
