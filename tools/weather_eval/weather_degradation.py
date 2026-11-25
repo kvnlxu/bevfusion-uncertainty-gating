@@ -143,7 +143,8 @@ def camera_weather(image, xyz, projection, weather, s, rng):
     t = np.exp(-0.065 * s * d)[..., None]
     x = x * t + 220 * (1 - t)
   elif weather == "rain":
-    x = x * (1 - 0.28 * s) + 95 * (0.28 * s)
+    veil = min(0.28 * s, 1.0)  # capped so severities > 1 stay a valid blend
+    x = x * (1 - veil) + 95 * veil
     mask = np.zeros((h, w), np.uint8)
     n = int(0.0015 * h * w * s)
     for u, v in zip(rng.integers(0, w, n), rng.integers(0, h, n)):
@@ -154,7 +155,8 @@ def camera_weather(image, xyz, projection, weather, s, rng):
     a = cv2.GaussianBlur(mask, (3, 3), 0).astype(np.float32)[..., None] / 255 * 0.65
     x = x * (1 - a) + 205 * a
   elif weather == "snow":
-    x = x * (1 - 0.35 * s) + 235 * (0.35 * s)
+    veil = min(0.35 * s, 1.0)  # capped so severities > 1 stay a valid blend
+    x = x * (1 - veil) + 235 * veil
     mask = np.zeros((h, w), np.uint8)
     n = int(0.00035 * h * w * s)
     for u, v in zip(rng.integers(0, w, n), rng.integers(0, h, n)):
@@ -174,6 +176,9 @@ def lidar_keep(xyz, weather, s, rng):
 
 
 MODALITIES = ("both", "camera", "lidar")
+# Severity 1.0 was the original maximum; values up to 3.0 push into heavier
+# weather on the same scale to locate the robustness cliff.
+MAX_SEVERITY = 3.0
 
 
 @PIPELINES.register_module()
@@ -182,7 +187,9 @@ class WeatherDegradation(object):
 
   Args:
     weather: "clean", "fog", "rain" or "snow".
-    severity: Strength in [0, 1]; 0 is a no-op (clean baseline).
+    severity: Strength in [0, MAX_SEVERITY]; 0 is a no-op (clean baseline).
+      Coefficients are unchanged from the original [0, 1] scale, so values
+      above 1 extend the same curves into heavier weather.
     seed: Base seed; per-sample RNG streams are derived from it.
     modality: Which sensors to degrade: "both" (default), "camera" only or
       "lidar" only. Single-sensor runs isolate which modality drives the
@@ -194,8 +201,10 @@ class WeatherDegradation(object):
       self, weather="clean", severity=0.0, seed=42, modality="both",
       debug_dir=None
   ):
-    if weather not in ("clean", "fog", "rain", "snow") or not 0 <= severity <= 1:
-      raise ValueError("Invalid weather or severity")
+    if weather not in ("clean", "fog", "rain", "snow"):
+      raise ValueError(f"Invalid weather {weather!r}")
+    if not 0 <= severity <= MAX_SEVERITY:
+      raise ValueError(f"Severity must be in [0, {MAX_SEVERITY}], got {severity}")
     if modality not in MODALITIES:
       raise ValueError(f"modality must be one of {MODALITIES}, got {modality!r}")
     self.weather = weather

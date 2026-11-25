@@ -105,6 +105,9 @@ def main():
   cfg.data.test.test_mode = True
   cfg.data.test.pop("samples_per_gpu", None)
 
+  encoders = cfg.model.get("encoders") or {}
+  model_kind = "fusion" if encoders.get("camera") else "lidar"
+
   step = _weather_step(cfg.data.test.get("pipeline"))
   if step is None:
     raise RuntimeError("No WeatherDegradation step in data.test.pipeline")
@@ -126,7 +129,8 @@ def main():
   model = MMDataParallel(model.cuda(), device_ids=[0])
 
   print(
-      f"Evaluating {len(dataset)} samples | weather={step.get('weather')} "
+      f"Evaluating {len(dataset)} samples | model={model_kind} "
+      f"weather={step.get('weather')} "
       f"severity={step.get('severity')} modality={step.get('modality', 'both')} "
       f"seed={step.get('seed')}"
   )
@@ -153,6 +157,7 @@ def main():
   record = dict(
       config=str(cfg_path),
       checkpoint=str(args.checkpoint),
+      model=model_kind,
       dataset_version=getattr(dataset, "version", None),
       num_samples=len(dataset),
       weather=step.get("weather"),

@@ -12,6 +12,14 @@ Run from the repository root, e.g.:
   python tools/weather_eval/sweep.py --checkpoint pretrained/bevfusion-det.pth \
     --weathers fog --severities 0.3 0.6 1.0 --modalities both camera lidar
 
+  # Heavier weather (severity above the original 1.0 maximum):
+  python tools/weather_eval/sweep.py --checkpoint pretrained/bevfusion-det.pth \
+    --weathers fog --severities 1.5 2.0 2.5 3.0
+
+  # LiDAR-only model under the same LiDAR degradation ("perfect gate" reference):
+  python tools/weather_eval/sweep.py --model lidar \
+    --checkpoint pretrained/lidar-only-det.pth --severities 0.6 1.0
+
   # Rebuild results.csv from existing runs without evaluating anything:
   python tools/weather_eval/sweep.py --collect-only
 """
@@ -29,8 +37,13 @@ CLASSES = [
     "car", "truck", "construction_vehicle", "bus", "trailer",
     "barrier", "motorcycle", "bicycle", "pedestrian", "traffic_cone",
 ]
+MAX_SEVERITY = 3.0  # must match weather_degradation.MAX_SEVERITY
+BASE_CONFIGS = {
+    "fusion": "configs/nuscenes/det/transfusion/secfpn/camera+lidar/swint_v0p075/convfuser.yaml",
+    "lidar": "configs/nuscenes/det/transfusion/secfpn/lidar/voxelnet_0p075.yaml",
+}
 CSV_FIELDS = (
-    ["weather", "severity", "modality", "seed", "mAP", "mAP_present", "NDS",
+    ["model", "weather", "severity", "modality", "seed", "mAP", "mAP_present", "NDS",
      "mATE", "mASE", "mAOE", "mAVE", "mAAE"]
     + [f"AP_{c}" for c in CLASSES]
     + ["num_samples", "dataset_version", "inference_seconds", "run_dir"]
@@ -40,6 +53,9 @@ CSV_FIELDS = (
 def parse_args():
   p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
   p.add_argument("--checkpoint", help="BEVFusion checkpoint (.pth)")
+  p.add_argument("--model", choices=["fusion", "lidar"], default="fusion",
+                 help="fusion: camera+lidar model (default). lidar: LiDAR-only "
+                      "model; only LiDAR is degraded and --modalities is ignored")
   p.add_argument(
       "--root", default="work_dirs/weather_sweep", help="Output root directory"
   )
@@ -47,14 +63,15 @@ def parse_args():
                  choices=["fog", "rain", "snow"])
   p.add_argument("--severities", nargs="+", type=float,
                  default=[0.2, 0.4, 0.6, 0.8, 1.0],
-                 help="Non-zero severities; the clean baseline is added automatically")
+                 help=f"Non-zero severities up to {MAX_SEVERITY}; the clean "
+                      "baseline is added automatically")
   p.add_argument("--modalities", nargs="+", default=["both"],
                  choices=["both", "camera", "lidar"])
   p.add_argument("--seeds", nargs="+", type=int, default=[42])
   p.add_argument("--no-clean", action="store_true",
                  help="Do not run the severity-0 clean baseline")
   p.add_argument("--base-config", default=None,
-                 help="Override make_weather_config.py's default base config")
+                 help="Override the base config chosen by --model")
   p.add_argument("--ann-file", default="data/nuscenes/nuscenes_infos_val_radar.pkl")
   p.add_argument("--workers", type=int, default=4)
   p.add_argument("--dry-run", action="store_true", help="Print commands only")
@@ -65,17 +82,20 @@ def parse_args():
   return p.parse_args()
 
 
-def run_name(weather, severity, modality, seed):
-  return f"{weather}_{round(severity * 100):03d}_{modality}_s{seed}"
+def run_name(model, weather, severity, modality, seed):
+  # Fusion runs keep the original names so earlier results are reused.
+  prefix = "" if model == "fusion" else f"{model}only_"
+  return f"{prefix}{weather}_{round(severity * 100):03d}_{modality}_s{seed}"
 
 
 def plan_runs(args):
+  modalities = ["lidar"] if args.model == "lidar" else args.modalities
   runs = []
   for seed in args.seeds:
     if not args.no_clean:
-      runs.append(("clean", 0.0, "both", seed))
+      runs.append(("clean", 0.0, "lidar" if args.model == "lidar" else "both", seed))
     for weather in args.weathers:
-      for modality in args.modalities:
+      for modality in modalities:
         for sev in args.severities:
           if sev <= 0:
             continue
@@ -92,7 +112,7 @@ def call(cmd, dry_run):
 def execute(args, runs):
   failed = []
   for i, (weather, sev, modality, seed) in enumerate(runs, 1):
-    run_dir = Path(args.root) / run_name(weather, sev, modality, seed)
+    run_dir = Path(args.root) / run_name(args.model, weather, sev, modality, seed)
     print(f"\n[{i}/{len(runs)}] {run_dir}", flush=True)
     if (REPO_ROOT / run_dir / "metrics.json").exists():
       print("  done already, skipping")
@@ -108,8 +128,7 @@ def execute(args, runs):
         "--mode", "full",
         "--skip-bev-map",
     ]
-    if args.base_config:
-      gen += ["--base-config", args.base_config]
+    gen += ["--base-config", args.base_config or BASE_CONFIGS[args.model]]
     ev = [
         sys.executable, str(HERE / "run_eval.py"),
         str(run_dir / "config.py"), args.checkpoint,
@@ -158,6 +177,7 @@ def collect(root):
     if map_present is None and present and class_ap:
       map_present = sum(class_ap[c] for c in present) / len(present)
     row = dict(
+        model=rec.get("model", "fusion"),
         weather=rec.get("weather"),
         severity=rec.get("severity"),
         modality=rec.get("modality", "both"),
@@ -178,7 +198,7 @@ def collect(root):
     for c in CLASSES:
       row[f"AP_{c}"] = class_ap.get(c)
     rows.append(row)
-  rows.sort(key=lambda r: (r["weather"] != "clean", r["weather"], r["modality"],
+  rows.sort(key=lambda r: (r["model"], r["weather"] != "clean", r["weather"], r["modality"],
                            r["severity"], r["seed"]))
   out = root_path / "results.csv"
   root_path.mkdir(parents=True, exist_ok=True)
@@ -191,7 +211,7 @@ def collect(root):
     print(f"mAP_present averages over: {', '.join(shared_present)}")
   for r in rows:
     mp = "  n/a " if r["mAP_present"] is None else f"{r['mAP_present']:.4f}"
-    print(f"  {r['weather']:>5} s={r['severity']:.2f} {r['modality']:>6} "
+    print(f"  {r['model']:>6} {r['weather']:>5} s={r['severity']:.2f} {r['modality']:>6} "
           f"seed={r['seed']}  mAP={r['mAP']:.4f}  mAP_present={mp}  "
           f"NDS={r['NDS']:.4f}")
 
@@ -201,6 +221,12 @@ def main():
   if not args.collect_only:
     if not args.checkpoint:
       sys.exit("--checkpoint is required unless --collect-only is given")
+    bad = [s for s in args.severities if not 0 < s <= MAX_SEVERITY]
+    if bad:
+      sys.exit(f"Severities must be in (0, {MAX_SEVERITY}]: {bad}")
+    if args.model == "lidar" and "lidar" not in Path(args.checkpoint).name:
+      print(f"Warning: --model lidar with checkpoint {args.checkpoint}; "
+            "expected pretrained/lidar-only-det.pth")
     runs = plan_runs(args)
     print(f"Planned {len(runs)} runs under {args.root}")
     failed = execute(args, runs)

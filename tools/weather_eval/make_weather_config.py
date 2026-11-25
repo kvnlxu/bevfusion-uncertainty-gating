@@ -14,6 +14,13 @@ from mmcv import Config
 DEFAULT_BASE_CONFIG = (
     "configs/nuscenes/det/transfusion/secfpn/camera+lidar/swint_v0p075/convfuser.yaml"
 )
+# Leaf config for the released LiDAR-only checkpoint (pretrained/lidar-only-det.pth).
+LIDAR_ONLY_BASE_CONFIG = (
+    "configs/nuscenes/det/transfusion/secfpn/lidar/voxelnet_0p075.yaml"
+)
+# Must match weather_degradation.MAX_SEVERITY (not imported here because that
+# module pulls in mmdet).
+MAX_SEVERITY = 3.0
 
 
 def parse_args():
@@ -38,7 +45,10 @@ def parse_args():
       help="Weather condition",
   )
   parser.add_argument(
-      "--severity", required=True, type=float, help="Weather severity in [0, 1]"
+      "--severity",
+      required=True,
+      type=float,
+      help=f"Weather severity in [0, {MAX_SEVERITY}] (1.0 was the original maximum)",
   )
   parser.add_argument(
       "--seed", type=int, default=42, help="Random seed for degradation"
@@ -261,30 +271,41 @@ def _load_merged_yaml(base_path: Path) -> dict:
 
 
 def _check_model(cfg):
-  """Fail early if the resolved config cannot be the camera+lidar fusion model."""
+  """Fail early if the resolved config is not a buildable BEVFusion detector.
+
+  Accepts the camera+lidar fusion model (camera backbone + fuser) and the
+  LiDAR-only model (no camera encoder). Returns "fusion" or "lidar".
+  """
   model = cfg.get("model") or {}
   encoders = model.get("encoders") or {}
+  camera = encoders.get("camera")
   problems = []
-  if not model.get("fuser"):
-    problems.append("model.fuser is null")
-  camera = encoders.get("camera") or {}
-  if camera and not camera.get("backbone"):
-    problems.append("model.encoders.camera has no backbone")
   if not encoders.get("lidar"):
     problems.append("model.encoders.lidar is missing")
+  if camera:
+    if not camera.get("backbone"):
+      problems.append("model.encoders.camera has no backbone")
+    if not model.get("fuser"):
+      problems.append("model.fuser is null")
   if problems:
     raise ValueError(
-        "Base config does not describe the camera+lidar fusion model ("
+        "Base config does not describe a buildable BEVFusion detector ("
         + "; ".join(problems)
         + "). Use a leaf config such as "
         + DEFAULT_BASE_CONFIG
+        + " (camera+lidar) or "
+        + LIDAR_ONLY_BASE_CONFIG
+        + " (LiDAR-only)"
     )
+  return "fusion" if camera else "lidar"
 
 
 def main():
   args = parse_args()
-  if not (0.0 <= args.severity <= 1.0):
-    raise ValueError(f"Severity must be in [0, 1], got {args.severity}")
+  if not (0.0 <= args.severity <= MAX_SEVERITY):
+    raise ValueError(
+        f"Severity must be in [0, {MAX_SEVERITY}], got {args.severity}"
+    )
 
   dest = Path(args.output_dir)
   dest.mkdir(parents=True, exist_ok=True)
@@ -296,7 +317,12 @@ def main():
     raw_cfg["dataset_root"] = args.data_root
   resolved_dict = _resolve_all(raw_cfg)
   cfg = Config(resolved_dict)
-  _check_model(cfg)
+  model_kind = _check_model(cfg)
+  if model_kind == "lidar" and args.modality != "lidar":
+    print(
+        f"Note: LiDAR-only model; --modality {args.modality} also degrades "
+        "camera images, which this model ignores."
+    )
 
   imports = dict(cfg.get("custom_imports") or {})
   names = imports.get("imports", [])
