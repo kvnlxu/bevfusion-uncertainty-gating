@@ -107,6 +107,7 @@ def main():
 
   encoders = cfg.model.get("encoders") or {}
   model_kind = "fusion" if encoders.get("camera") else "lidar"
+  camera_scale = float((cfg.model.get("fuser") or {}).get("camera_scale", 1.0))
 
   step = _weather_step(cfg.data.test.get("pipeline"))
   if step is None:
@@ -130,6 +131,7 @@ def main():
 
   print(
       f"Evaluating {len(dataset)} samples | model={model_kind} "
+      f"camera_scale={camera_scale:g} "
       f"weather={step.get('weather')} "
       f"severity={step.get('severity')} modality={step.get('modality', 'both')} "
       f"seed={step.get('seed')}"
@@ -158,6 +160,7 @@ def main():
       config=str(cfg_path),
       checkpoint=str(args.checkpoint),
       model=model_kind,
+      camera_scale=camera_scale,
       dataset_version=getattr(dataset, "version", None),
       num_samples=len(dataset),
       weather=step.get("weather"),

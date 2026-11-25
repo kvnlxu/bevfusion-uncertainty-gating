@@ -54,6 +54,15 @@ def parse_args():
       "--seed", type=int, default=42, help="Random seed for degradation"
   )
   parser.add_argument(
+      "--camera-scale",
+      type=float,
+      default=1.0,
+      help=(
+          "Multiply camera BEV features by this before fusion (ConvFuser). "
+          "0 switches the camera off (untrained hard gate); default 1.0"
+      ),
+  )
+  parser.add_argument(
       "--modality",
       choices=["both", "camera", "lidar"],
       default="both",
@@ -318,6 +327,10 @@ def main():
   resolved_dict = _resolve_all(raw_cfg)
   cfg = Config(resolved_dict)
   model_kind = _check_model(cfg)
+  if args.camera_scale != 1.0:
+    if model_kind != "fusion":
+      raise ValueError("--camera-scale needs the camera+lidar fusion model")
+    cfg["model"]["fuser"]["camera_scale"] = float(args.camera_scale)
   if model_kind == "lidar" and args.modality != "lidar":
     print(
         f"Note: LiDAR-only model; --modality {args.modality} also degrades "

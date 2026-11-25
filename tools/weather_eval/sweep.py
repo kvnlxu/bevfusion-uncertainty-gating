@@ -20,6 +20,10 @@ Run from the repository root, e.g.:
   python tools/weather_eval/sweep.py --model lidar \
     --checkpoint pretrained/lidar-only-det.pth --severities 0.6 1.0
 
+  # Fused model with the camera switched off at the fusion point (hard gate):
+  python tools/weather_eval/sweep.py --checkpoint pretrained/bevfusion-det.pth \
+    --camera-scale 0 --weathers fog --severities 1.0 1.5 2.0 3.0
+
   # Rebuild results.csv from existing runs without evaluating anything:
   python tools/weather_eval/sweep.py --collect-only
 """
@@ -43,7 +47,7 @@ BASE_CONFIGS = {
     "lidar": "configs/nuscenes/det/transfusion/secfpn/lidar/voxelnet_0p075.yaml",
 }
 CSV_FIELDS = (
-    ["model", "weather", "severity", "modality", "seed", "mAP", "mAP_present", "NDS",
+    ["model", "camera_scale", "weather", "severity", "modality", "seed", "mAP", "mAP_present", "NDS",
      "mATE", "mASE", "mAOE", "mAVE", "mAAE"]
     + [f"AP_{c}" for c in CLASSES]
     + ["num_samples", "dataset_version", "inference_seconds", "run_dir"]
@@ -68,6 +72,9 @@ def parse_args():
   p.add_argument("--modalities", nargs="+", default=["both"],
                  choices=["both", "camera", "lidar"])
   p.add_argument("--seeds", nargs="+", type=int, default=[42])
+  p.add_argument("--camera-scale", type=float, default=1.0,
+                 help="Scale camera BEV features before fusion (fusion model "
+                      "only); 0 switches the camera off. Default 1.0")
   p.add_argument("--no-clean", action="store_true",
                  help="Do not run the severity-0 clean baseline")
   p.add_argument("--base-config", default=None,
@@ -82,10 +89,13 @@ def parse_args():
   return p.parse_args()
 
 
-def run_name(model, weather, severity, modality, seed):
-  # Fusion runs keep the original names so earlier results are reused.
+def run_name(model, weather, severity, modality, seed, camera_scale=1.0):
+  # Fusion runs at camera_scale 1 keep the original names so earlier results
+  # are reused.
   prefix = "" if model == "fusion" else f"{model}only_"
-  return f"{prefix}{weather}_{round(severity * 100):03d}_{modality}_s{seed}"
+  suffix = "" if camera_scale == 1.0 else f"_cam{round(camera_scale * 100):03d}"
+  return (f"{prefix}{weather}_{round(severity * 100):03d}_{modality}"
+          f"_s{seed}{suffix}")
 
 
 def plan_runs(args):
@@ -112,7 +122,8 @@ def call(cmd, dry_run):
 def execute(args, runs):
   failed = []
   for i, (weather, sev, modality, seed) in enumerate(runs, 1):
-    run_dir = Path(args.root) / run_name(args.model, weather, sev, modality, seed)
+    run_dir = Path(args.root) / run_name(
+        args.model, weather, sev, modality, seed, args.camera_scale)
     print(f"\n[{i}/{len(runs)}] {run_dir}", flush=True)
     if (REPO_ROOT / run_dir / "metrics.json").exists():
       print("  done already, skipping")
@@ -129,6 +140,8 @@ def execute(args, runs):
         "--skip-bev-map",
     ]
     gen += ["--base-config", args.base_config or BASE_CONFIGS[args.model]]
+    if args.camera_scale != 1.0:
+      gen += ["--camera-scale", str(args.camera_scale)]
     ev = [
         sys.executable, str(HERE / "run_eval.py"),
         str(run_dir / "config.py"), args.checkpoint,
@@ -178,6 +191,7 @@ def collect(root):
       map_present = sum(class_ap[c] for c in present) / len(present)
     row = dict(
         model=rec.get("model", "fusion"),
+        camera_scale=rec.get("camera_scale", 1.0),
         weather=rec.get("weather"),
         severity=rec.get("severity"),
         modality=rec.get("modality", "both"),
@@ -198,7 +212,8 @@ def collect(root):
     for c in CLASSES:
       row[f"AP_{c}"] = class_ap.get(c)
     rows.append(row)
-  rows.sort(key=lambda r: (r["model"], r["weather"] != "clean", r["weather"], r["modality"],
+  rows.sort(key=lambda r: (r["model"], -float(r["camera_scale"]),
+                           r["weather"] != "clean", r["weather"], r["modality"],
                            r["severity"], r["seed"]))
   out = root_path / "results.csv"
   root_path.mkdir(parents=True, exist_ok=True)
@@ -211,7 +226,8 @@ def collect(root):
     print(f"mAP_present averages over: {', '.join(shared_present)}")
   for r in rows:
     mp = "  n/a " if r["mAP_present"] is None else f"{r['mAP_present']:.4f}"
-    print(f"  {r['model']:>6} {r['weather']:>5} s={r['severity']:.2f} {r['modality']:>6} "
+    cam = "" if float(r["camera_scale"]) == 1.0 else f" cam={float(r['camera_scale']):g}"
+    print(f"  {r['model']:>6}{cam} {r['weather']:>5} s={r['severity']:.2f} {r['modality']:>6} "
           f"seed={r['seed']}  mAP={r['mAP']:.4f}  mAP_present={mp}  "
           f"NDS={r['NDS']:.4f}")
 
@@ -224,6 +240,8 @@ def main():
     bad = [s for s in args.severities if not 0 < s <= MAX_SEVERITY]
     if bad:
       sys.exit(f"Severities must be in (0, {MAX_SEVERITY}]: {bad}")
+    if args.model == "lidar" and args.camera_scale != 1.0:
+      sys.exit("--camera-scale only applies to --model fusion")
     if args.model == "lidar" and "lidar" not in Path(args.checkpoint).name:
       print(f"Warning: --model lidar with checkpoint {args.checkpoint}; "
             "expected pretrained/lidar-only-det.pth")
