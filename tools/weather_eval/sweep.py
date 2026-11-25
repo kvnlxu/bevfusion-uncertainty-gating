@@ -25,11 +25,16 @@ import sys
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 
-CSV_FIELDS = [
-    "weather", "severity", "modality", "seed", "mAP", "NDS",
-    "mATE", "mASE", "mAOE", "mAVE", "mAAE",
-    "num_samples", "dataset_version", "inference_seconds", "run_dir",
+CLASSES = [
+    "car", "truck", "construction_vehicle", "bus", "trailer",
+    "barrier", "motorcycle", "bicycle", "pedestrian", "traffic_cone",
 ]
+CSV_FIELDS = (
+    ["weather", "severity", "modality", "seed", "mAP", "mAP_present", "NDS",
+     "mATE", "mASE", "mAOE", "mAVE", "mAAE"]
+    + [f"AP_{c}" for c in CLASSES]
+    + ["num_samples", "dataset_version", "inference_seconds", "run_dir"]
+)
 
 
 def parse_args():
@@ -122,18 +127,43 @@ def execute(args, runs):
   return failed
 
 
+def _class_ap(rec, run_dir):
+  """Per-class AP from metrics.json, or from the devkit summary for older runs."""
+  if rec.get("class_ap"):
+    return rec["class_ap"]
+  summary = run_dir / "nusc" / "metrics_summary.json"
+  if summary.exists():
+    return json.loads(summary.read_text()).get("mean_dist_aps", {})
+  return {}
+
+
 def collect(root):
   root_path = REPO_ROOT / root
+  records = [
+      (path.parent, json.loads(path.read_text()))
+      for path in sorted(root_path.glob("*/metrics.json"))
+  ]
+  # All runs share one val split, so a run recorded before mAP_present existed
+  # can borrow the present-class list from any newer run.
+  shared_present = next(
+      (rec["present_classes"] for _, rec in records if rec.get("present_classes")),
+      None,
+  )
   rows = []
-  for path in sorted(root_path.glob("*/metrics.json")):
-    rec = json.loads(path.read_text())
+  for run_dir, rec in records:
     m = rec.get("metrics", {})
-    rows.append(dict(
+    class_ap = _class_ap(rec, run_dir)
+    present = rec.get("present_classes") or shared_present
+    map_present = rec.get("mAP_present")
+    if map_present is None and present and class_ap:
+      map_present = sum(class_ap[c] for c in present) / len(present)
+    row = dict(
         weather=rec.get("weather"),
         severity=rec.get("severity"),
         modality=rec.get("modality", "both"),
         seed=rec.get("degradation_seed"),
         mAP=rec.get("mAP"),
+        mAP_present=map_present,
         NDS=rec.get("NDS"),
         mATE=m.get("object/mATE"),
         mASE=m.get("object/mASE"),
@@ -143,8 +173,11 @@ def collect(root):
         num_samples=rec.get("num_samples"),
         dataset_version=rec.get("dataset_version"),
         inference_seconds=rec.get("inference_seconds"),
-        run_dir=str(path.parent.relative_to(REPO_ROOT)),
-    ))
+        run_dir=str(run_dir.relative_to(REPO_ROOT)),
+    )
+    for c in CLASSES:
+      row[f"AP_{c}"] = class_ap.get(c)
+    rows.append(row)
   rows.sort(key=lambda r: (r["weather"] != "clean", r["weather"], r["modality"],
                            r["severity"], r["seed"]))
   out = root_path / "results.csv"
@@ -154,9 +187,13 @@ def collect(root):
     writer.writeheader()
     writer.writerows(rows)
   print(f"\nWrote {len(rows)} rows to {out}")
+  if shared_present:
+    print(f"mAP_present averages over: {', '.join(shared_present)}")
   for r in rows:
+    mp = "  n/a " if r["mAP_present"] is None else f"{r['mAP_present']:.4f}"
     print(f"  {r['weather']:>5} s={r['severity']:.2f} {r['modality']:>6} "
-          f"seed={r['seed']}  mAP={r['mAP']:.4f}  NDS={r['NDS']:.4f}")
+          f"seed={r['seed']}  mAP={r['mAP']:.4f}  mAP_present={mp}  "
+          f"NDS={r['NDS']:.4f}")
 
 
 def main():

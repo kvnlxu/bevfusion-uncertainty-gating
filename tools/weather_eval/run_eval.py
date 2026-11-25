@@ -15,6 +15,7 @@ Example:
     work_dirs/weather_full/fog_060/config.py pretrained/bevfusion-det.pth
 """
 import argparse
+from collections import Counter
 import json
 from pathlib import Path
 import sys
@@ -63,6 +64,26 @@ def _weather_step(pipeline):
     if isinstance(op, dict) and op.get("type") == "WeatherDegradation":
       return op
   return None
+
+
+def gt_class_counts(dataset):
+  """Ground-truth boxes per class, counting only boxes the nuScenes eval keeps.
+
+  valid_flag marks boxes with at least one LiDAR or radar point; the devkit
+  drops the rest.
+  """
+  counts = Counter()
+  for info in dataset.data_infos:
+    names = info.get("gt_names", [])
+    flags = info.get("valid_flag", [True] * len(names))
+    counts.update(n for n, ok in zip(names, flags) if ok)
+  return {c: int(counts.get(c, 0)) for c in dataset.CLASSES}
+
+
+def per_class_ap(summary_path):
+  """Per-class AP averaged over distance thresholds, from the devkit summary."""
+  summary = json.loads(Path(summary_path).read_text())
+  return {k: float(v) for k, v in summary["mean_dist_aps"].items()}
 
 
 def main():
@@ -119,6 +140,16 @@ def main():
   metrics = dataset.evaluate(
       outputs, metric="bbox", jsonfile_prefix=str(out_dir / "nusc")
   )
+
+  # The 10-class nuScenes mAP counts classes with no ground truth in the split
+  # as AP 0 (mini_val lacks some classes), so also report mAP over the classes
+  # that are actually present.
+  gt_counts = gt_class_counts(dataset)
+  class_ap = per_class_ap(out_dir / "nusc" / "metrics_summary.json")
+  present = [c for c in dataset.CLASSES if gt_counts.get(c, 0) > 0]
+  map_present = (
+      sum(class_ap[c] for c in present) / len(present) if present else None
+  )
   record = dict(
       config=str(cfg_path),
       checkpoint=str(args.checkpoint),
@@ -131,10 +162,21 @@ def main():
       inference_seconds=round(elapsed, 1),
       mAP=metrics.get("object/map"),
       NDS=metrics.get("object/nds"),
+      mAP_present=map_present,
+      present_classes=present,
+      gt_counts=gt_counts,
+      class_ap=class_ap,
       metrics={k: float(v) for k, v in metrics.items()},
   )
   metrics_path.write_text(json.dumps(record, indent=2))
-  print(f"mAP={record['mAP']:.4f} NDS={record['NDS']:.4f} -> {metrics_path}")
+  missing = [c for c in dataset.CLASSES if c not in present]
+  print(f"GT boxes per class: {gt_counts}")
+  if missing:
+    print(f"No ground truth in this split for: {missing}")
+  print(
+      f"mAP={record['mAP']:.4f} NDS={record['NDS']:.4f} "
+      f"mAP_present={map_present:.4f} ({len(present)} classes) -> {metrics_path}"
+  )
 
 
 if __name__ == "__main__":
