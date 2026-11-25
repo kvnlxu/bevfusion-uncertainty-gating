@@ -49,6 +49,20 @@ def check_model(config_path: str, checkpoint: str):
   model = build_model(cfg.model, test_cfg=cfg.get("test_cfg"))
   print(f"Model built: {type(model).__name__} | fuser: {type(model.fuser).__name__}")
 
+  # mmcv's own sparse conv layers share names with mmdet3d.ops.spconv in the
+  # CONV_LAYERS registry but cannot consume mmdet3d's SparseConvTensor.
+  foreign = sorted({
+      f"{type(m).__module__}.{type(m).__name__}"
+      for m in model.modules()
+      if type(m).__module__.startswith("mmcv.ops")
+  })
+  if foreign:
+    raise SystemExit(
+        "Model contains mmcv.ops layers that mmdet3d's sparse encoder cannot "
+        f"run: {foreign}. Check CONV_LAYERS registration in "
+        "mmdet3d/ops/spconv/conv.py."
+    )
+
   ckpt = torch.load(checkpoint, map_location="cpu")
   ckpt_sd = ckpt.get("state_dict", ckpt)
   model_sd = model.state_dict()
