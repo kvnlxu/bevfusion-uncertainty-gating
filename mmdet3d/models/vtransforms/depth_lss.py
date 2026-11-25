@@ -24,7 +24,22 @@ class DepthLSSTransform(BaseDepthTransform):
         zbound: Tuple[float, float, float],
         dbound: Tuple[float, float, float],
         downsample: int = 1,
+        use_points: str = "lidar",
+        depth_input: str = "scalar",
+        height_expand: bool = False,
+        add_depth_features: bool = False,
     ) -> None:
+        # BaseTransform in this fork defaults to the radar-camera settings
+        # (height_expand=True, add_depth_features=True), which build a
+        # (1 + point_dims)-channel depth map. This transform's dtransform takes a
+        # single scalar-depth channel, matching the original BEVFusion
+        # camera+lidar model and its released checkpoint, so default to that.
+        if depth_input != "scalar" or add_depth_features:
+            raise ValueError(
+                "DepthLSSTransform expects a 1-channel scalar depth map "
+                "(depth_input='scalar', add_depth_features=False); got "
+                f"depth_input={depth_input!r}, add_depth_features={add_depth_features}"
+            )
         super().__init__(
             in_channels=in_channels,
             out_channels=out_channels,
@@ -34,6 +49,10 @@ class DepthLSSTransform(BaseDepthTransform):
             ybound=ybound,
             zbound=zbound,
             dbound=dbound,
+            use_points=use_points,
+            depth_input=depth_input,
+            height_expand=height_expand,
+            add_depth_features=add_depth_features,
         )
         self.dtransform = nn.Sequential(
             nn.Conv2d(1, 8, 1),
