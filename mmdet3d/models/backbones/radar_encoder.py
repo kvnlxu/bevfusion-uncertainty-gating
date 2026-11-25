@@ -12,10 +12,26 @@ from torch.nn import functional as F
 from mmdet3d.models.builder import build_backbone
 from mmdet.models import BACKBONES
 from torchvision.utils import save_image
-from mmdet3d.ops import feature_decorator
 from mmcv.cnn.bricks.non_local import NonLocal2d
 
-from flash_attn.flash_attention import FlashMHA
+# Optional dependencies, only needed when a radar encoder actually runs.
+# feature_decorator_ext is a CUDA extension that setup.py does not build, and
+# flash_attn is not installed by default (FlashMHA is unused here). Importing
+# them unconditionally breaks `import mmdet3d.models` for every model,
+# including camera+lidar BEVFusion, so defer the failure to first use.
+try:
+    from mmdet3d.ops.feature_decorator import feature_decorator
+except ImportError as _feature_decorator_err:  # pragma: no cover
+    def feature_decorator(*args, _err=_feature_decorator_err, **kwargs):
+        raise ImportError(
+            "feature_decorator_ext is not built; add it to setup.py and "
+            "rebuild to use RadarFeatureNet's CUDA feature decorator."
+        ) from _err
+
+try:
+    from flash_attn.flash_attention import FlashMHA  # noqa: F401
+except ImportError:  # pragma: no cover
+    FlashMHA = None
 
 
 __all__ = ["RadarFeatureNet", "RadarEncoder"]

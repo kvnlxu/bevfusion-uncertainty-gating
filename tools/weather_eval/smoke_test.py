@@ -2,8 +2,15 @@ import argparse
 from pathlib import Path
 import sys
 
-from mmcv import Config
-from mmdet3d.datasets import build_dataset
+# Running `python tools/weather_eval/smoke_test.py` puts tools/weather_eval on
+# sys.path, not the repo root, so the config's custom_imports
+# ("tools.weather_eval.weather_degradation") would not be importable.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+  sys.path.insert(0, str(REPO_ROOT))
+
+from mmcv import Config  # noqa: E402
+from mmdet3d.datasets import build_dataset  # noqa: E402
 
 
 def build_smoke_dataset(config_path: str, drop_bev_seg: bool = True):
