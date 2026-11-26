@@ -21,8 +21,12 @@ Run from the repository root, e.g.:
   python tools/weather_eval/bootstrap.py \
     --pair work_dirs/weather_sweep/fog_200_both_s42 work_dirs/weather_sweep/lidaronly_fog_200_lidar_s42
 
-  # The default set of comparisons behind the current findings:
+  # The default set of comparisons behind the current findings, plus pooled
+  # tests (e.g. the mean fused-vs-LiDAR-only gap over fog 1.5-3.0):
   python tools/weather_eval/bootstrap.py --preset fog-crossover
+
+  # Pool your own pairs into one test:
+  python tools/weather_eval/bootstrap.py --pool --pair RUN_A1 RUN_B1 --pair RUN_A2 RUN_B2
 """
 import argparse
 import csv
@@ -61,12 +65,37 @@ PRESETS = {
     ],
 }
 
+# Pooled tests: the mean difference over several pairs, computed on the same
+# bootstrap replicates, so it is one test instead of several. More powerful
+# than the individual tests when the effect points the same way throughout.
+_HEAVY_FOG = ("fog_150", "fog_200", "fog_250", "fog_300")
+POOLS = {
+    "fog-crossover": [
+        ("heavy fog 1.5-3.0: fused vs LiDAR-only",
+         [(f"{SWEEP}/{f}_both_s42", f"{SWEEP}/lidaronly_{f}_lidar_s42")
+          for f in _HEAVY_FOG]),
+        ("camera-only fog 2.0-3.0 vs LiDAR-only clean",
+         [(f"{SWEEP}/{f}_camera_s42", f"{SWEEP}/lidaronly_clean_000_lidar_s42")
+          for f in ("fog_200", "fog_300")]),
+    ],
+    "camera-off": [
+        ("fog 1.0-3.0: camera off vs LiDAR-only",
+         [(f"{SWEEP}/{f}_both_s42_cam000", f"{SWEEP}/lidaronly_{f}_lidar_s42")
+          for f in ("fog_100", "fog_150", "fog_200", "fog_300")]),
+        ("fog 1.0-3.0: camera off vs normal fused",
+         [(f"{SWEEP}/{f}_both_s42_cam000", f"{SWEEP}/{f}_both_s42")
+          for f in ("fog_100", "fog_150", "fog_200", "fog_300")]),
+    ],
+}
+
 
 def parse_args():
   p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
   p.add_argument("--pair", nargs=2, action="append", metavar=("RUN_A", "RUN_B"),
                  help="Two run directories to compare (repeatable)")
   p.add_argument("--preset", choices=sorted(PRESETS), help="Named set of pairs")
+  p.add_argument("--pool", action="store_true",
+                 help="Also test the mean difference over all --pair pairs")
   p.add_argument("--reps", type=int, default=2000, help="Bootstrap replicates")
   p.add_argument("--block", type=int, default=8,
                  help="Block length in consecutive samples within a scene "
@@ -243,12 +272,23 @@ def block_weights(split, block, rng):
 
 def main():
   args = parse_args()
-  pairs = [tuple(p) for p in (args.pair or [])]
+  user_pairs = [tuple(p) for p in (args.pair or [])]
+  pairs = list(user_pairs)
+  pools = []
+  if args.pool and len(user_pairs) > 1:
+    pools.append(("all --pair pairs", user_pairs))
   if args.preset:
     pairs += PRESETS[args.preset]
+    pools += POOLS.get(args.preset, [])
   if not pairs:
     sys.exit("Give --pair RUN_A RUN_B and/or --preset")
-  pairs = [(str(REPO_ROOT / a), str(REPO_ROOT / b)) for a, b in pairs]
+  for label, members in pools:
+    extra = [m for m in members if m not in pairs]
+    if extra:
+      sys.exit(f"Pool '{label}' uses pairs that are not being compared: {extra}")
+  abs_pair = lambda pr: (str(REPO_ROOT / pr[0]), str(REPO_ROOT / pr[1]))
+  keys = list(dict.fromkeys(pairs))  # de-duplicate, keep order
+  pairs = [abs_pair(pr) for pr in keys]
   missing = sorted({d for p in pairs for d in p
                     if not (Path(d) / "nusc" / "results_nusc.json").exists()})
   if missing:
@@ -281,30 +321,56 @@ def main():
   replicates = [block_weights(split, args.block, rng) for _ in range(args.reps)]
   ones = np.ones(len(split.tokens))
 
+  def summarize(base, diffs):
+    lo, hi = np.percentile(diffs, [2.5, 97.5])
+    # Two-sided p-value: twice the share of replicates whose difference has the
+    # opposite sign to (or equals zero relative to) the observed one.
+    p = min(1.0, 2 * float(np.mean(diffs <= 0) if base > 0 else np.mean(diffs >= 0)))
+    sig = "significant" if lo > 0 or hi < 0 else "not significant"
+    return lo, hi, p, sig
+
   rows = []
-  for a, b in pairs:
+  results = {}
+  for key, (a, b) in zip(keys, pairs):
     ra, rb = runs[a], runs[b]
-    base = ra.mean_ap(classes, split, ones) - rb.mean_ap(classes, split, ones)
+    map_a, map_b = ra.mean_ap(classes, split, ones), rb.mean_ap(classes, split, ones)
+    base = map_a - map_b
     diffs = np.array([
         ra.mean_ap(classes, split, w) - rb.mean_ap(classes, split, w)
         for w in replicates
     ])
-    lo, hi = np.percentile(diffs, [2.5, 97.5])
-    # Two-sided p-value: how often the replicate difference has the opposite
-    # sign to (or equals zero relative to) the observed one.
-    p = min(1.0, 2 * float(np.mean(diffs <= 0) if base > 0 else np.mean(diffs >= 0)))
-    row = dict(
+    results[key] = (map_a, map_b, base, diffs)
+    lo, hi, p, sig = summarize(base, diffs)
+    rows.append(dict(
         run_a=str(Path(a).relative_to(REPO_ROOT)),
         run_b=str(Path(b).relative_to(REPO_ROOT)),
-        mAP_a=ra.mean_ap(classes, split, ones),
-        mAP_b=rb.mean_ap(classes, split, ones),
+        mAP_a=map_a, mAP_b=map_b,
         diff=base, ci_low=lo, ci_high=hi, p_value=p,
         reps=args.reps, block=args.block, n_classes=len(classes),
-    )
-    rows.append(row)
-    sig = "significant" if lo > 0 or hi < 0 else "not significant"
+    ))
     print(f"{Path(a).name}  vs  {Path(b).name}")
-    print(f"  mAP {row['mAP_a']:.4f} vs {row['mAP_b']:.4f}  "
+    print(f"  mAP {map_a:.4f} vs {map_b:.4f}  "
+          f"diff {100 * base:+.2f} pts  95% CI [{100 * lo:+.2f}, {100 * hi:+.2f}]  "
+          f"p={p:.3f}  ({sig} at 5%)")
+
+  if pools:
+    print("\nPooled tests (mean difference over the listed pairs, same replicates):")
+  for label, members in pools:
+    m = [results[k] for k in members]
+    map_a = float(np.mean([r[0] for r in m]))
+    map_b = float(np.mean([r[1] for r in m]))
+    base = float(np.mean([r[2] for r in m]))
+    diffs = np.mean([r[3] for r in m], axis=0)
+    lo, hi, p, sig = summarize(base, diffs)
+    rows.append(dict(
+        run_a=f"POOLED: {label}",
+        run_b=" | ".join(f"{Path(a).name} vs {Path(b).name}" for a, b in members),
+        mAP_a=map_a, mAP_b=map_b,
+        diff=base, ci_low=lo, ci_high=hi, p_value=p,
+        reps=args.reps, block=args.block, n_classes=len(classes),
+    ))
+    print(f"{label}  ({len(members)} pairs)")
+    print(f"  mean mAP {map_a:.4f} vs {map_b:.4f}  "
           f"diff {100 * base:+.2f} pts  95% CI [{100 * lo:+.2f}, {100 * hi:+.2f}]  "
           f"p={p:.3f}  ({sig} at 5%)")
 
