@@ -48,6 +48,7 @@ from mmdet.datasets import build_dataloader  # noqa: E402
 from mmdet3d.datasets import build_dataset  # noqa: E402
 from mmdet3d.models import build_model  # noqa: E402
 from mmdet3d.utils import get_root_logger  # noqa: E402
+import mmdet3d.runner  # noqa: E402,F401  (registers CustomEpochBasedRunner)
 
 
 def parse_args():
