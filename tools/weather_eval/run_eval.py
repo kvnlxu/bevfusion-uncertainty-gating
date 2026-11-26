@@ -106,8 +106,11 @@ def main():
   cfg.data.test.pop("samples_per_gpu", None)
 
   encoders = cfg.model.get("encoders") or {}
+  fuser_cfg = cfg.model.get("fuser") or {}
   model_kind = "fusion" if encoders.get("camera") else "lidar"
-  camera_scale = float((cfg.model.get("fuser") or {}).get("camera_scale", 1.0))
+  if fuser_cfg.get("type") == "GatedConvFuser":
+    model_kind = f"gated-{fuser_cfg.get('gate_type', 'modality')}"
+  camera_scale = float(fuser_cfg.get("camera_scale", 1.0))
 
   step = _weather_step(cfg.data.test.get("pipeline"))
   if step is None:
@@ -136,6 +139,14 @@ def main():
       f"severity={step.get('severity')} modality={step.get('modality', 'both')} "
       f"seed={step.get('seed')}"
   )
+  gate_weights = []
+  fuser = getattr(model.module, "fuser", None)
+  if fuser is not None and hasattr(fuser, "last_weights"):
+    def _record(module, inputs, output):
+      if module.last_weights is not None:
+        gate_weights.append(module.last_weights)
+    fuser.register_forward_hook(_record)
+
   start = time.time()
   outputs = single_gpu_test(model, loader)
   elapsed = time.time() - start
@@ -161,6 +172,10 @@ def main():
       checkpoint=str(args.checkpoint),
       model=model_kind,
       camera_scale=camera_scale,
+      gate_w_cam=(sum(w[0] for w in gate_weights) / len(gate_weights)
+                  if gate_weights else None),
+      gate_w_lidar=(sum(w[1] for w in gate_weights) / len(gate_weights)
+                    if gate_weights else None),
       dataset_version=getattr(dataset, "version", None),
       num_samples=len(dataset),
       weather=step.get("weather"),
@@ -181,6 +196,9 @@ def main():
   print(f"GT boxes per class: {gt_counts}")
   if missing:
     print(f"No ground truth in this split for: {missing}")
+  if gate_weights:
+    print(f"Mean gate weights: camera {record['gate_w_cam']:.3f}, "
+          f"LiDAR {record['gate_w_lidar']:.3f}")
   print(
       f"mAP={record['mAP']:.4f} NDS={record['NDS']:.4f} "
       f"mAP_present={map_present:.4f} ({len(present)} classes) -> {metrics_path}"

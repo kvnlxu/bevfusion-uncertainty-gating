@@ -195,11 +195,19 @@ class WeatherDegradation(object):
       "lidar" only. Single-sensor runs isolate which modality drives the
       robustness cliff.
     debug_dir: If set, write degraded images, point clouds and stats.json.
+    random_cfg: Training mode. If set, every call draws its own condition
+      and ignores weather/severity/modality/seed. Keys (all optional):
+        clean_prob (0.25): probability of leaving the sample clean
+        weathers (["fog", "rain", "snow"]): weathers to draw from uniformly
+        severity_range ([0.0, MAX_SEVERITY]): uniform severity range
+        modality_probs ({"both": 0.5, "camera": 0.25, "lidar": 0.25})
+      Draws use NumPy's global RNG, which mmdet's dataloader seeds per worker
+      and epoch, so conditions differ across epochs but runs are reproducible.
   """
 
   def __init__(
       self, weather="clean", severity=0.0, seed=42, modality="both",
-      debug_dir=None
+      debug_dir=None, random_cfg=None
   ):
     if weather not in ("clean", "fog", "rain", "snow"):
       raise ValueError(f"Invalid weather {weather!r}")
@@ -212,6 +220,38 @@ class WeatherDegradation(object):
     self.seed = int(seed)
     self.modality = modality
     self.debug_dir = Path(debug_dir) if debug_dir else None
+    self.random_cfg = None
+    if random_cfg is not None:
+      cfg = dict(random_cfg)
+      self.random_cfg = dict(
+          clean_prob=float(cfg.get("clean_prob", 0.25)),
+          weathers=list(cfg.get("weathers", ["fog", "rain", "snow"])),
+          severity_range=tuple(cfg.get("severity_range", (0.0, MAX_SEVERITY))),
+          modality_probs=dict(
+              cfg.get("modality_probs", {"both": 0.5, "camera": 0.25, "lidar": 0.25})
+          ),
+      )
+      rc = self.random_cfg
+      lo, hi = rc["severity_range"]
+      if not 0 <= lo <= hi <= MAX_SEVERITY:
+        raise ValueError(f"severity_range must lie in [0, {MAX_SEVERITY}]")
+      if not set(rc["weathers"]) <= {"fog", "rain", "snow"}:
+        raise ValueError(f"Invalid weathers {rc['weathers']}")
+      if not set(rc["modality_probs"]) <= set(MODALITIES):
+        raise ValueError(f"Invalid modality_probs keys {list(rc['modality_probs'])}")
+
+  def _draw_condition(self):
+    """Random (weather, severity, modality) for one training sample."""
+    rc = self.random_cfg
+    if np.random.rand() < rc["clean_prob"]:
+      return "clean", 0.0, "both"
+    weather = rc["weathers"][np.random.randint(len(rc["weathers"]))]
+    lo, hi = rc["severity_range"]
+    severity = float(np.random.uniform(lo, hi))
+    names = list(rc["modality_probs"])
+    probs = np.array([rc["modality_probs"][n] for n in names], dtype=np.float64)
+    modality = names[np.random.choice(len(names), p=probs / probs.sum())]
+    return weather, severity, modality
 
   def transform(self, results):
     raw_images = results["img"]
@@ -224,33 +264,38 @@ class WeatherDegradation(object):
     sample = str(
         results.get("token") or results.get("sample_idx") or results["img_path"]
     )
+    if self.random_cfg is not None:
+      weather, s, modality = self._draw_condition()
+      seed = int(np.random.randint(2**31 - 1))
+    else:
+      weather, s, modality, seed = self.weather, self.s, self.modality, self.seed
     # RNG streams are keyed by sample and sensor only, so the camera-only and
     # lidar-only runs apply exactly the same corruption as the "both" run.
-    if self.modality in ("both", "camera"):
+    if modality in ("both", "camera"):
       changed = [
           camera_weather(
               im,
               xyz,
               p,
-              self.weather,
-              self.s,
-              rng_for(self.seed, sample, f"{self.weather}-cam-{i}"),
+              weather,
+              s,
+              rng_for(seed, sample, f"{weather}-cam-{i}"),
           )
           for i, (im, p) in enumerate(zip(images, projections))
       ]
     else:
       changed = [im.copy() for im in images]
-    if self.modality in ("both", "lidar"):
+    if modality in ("both", "lidar"):
       keep = lidar_keep(
           xyz,
-          self.weather,
-          self.s,
-          rng_for(self.seed, sample, f"{self.weather}-lidar"),
+          weather,
+          s,
+          rng_for(seed, sample, f"{weather}-lidar"),
       )
     else:
       keep = np.ones(len(xyz), dtype=bool)
 
-    if self.s == 0 or self.weather == "clean":
+    if s == 0 or weather == "clean":
       assert (
           all(np.array_equal(a, b) for a, b in zip(images, changed))
           and keep.all()
@@ -275,10 +320,10 @@ class WeatherDegradation(object):
       np.save(self.debug_dir / "lidar_weather_xyz.npy", xyz[keep])
       stats = dict(
           sample=sample,
-          weather=self.weather,
-          severity=self.s,
-          seed=self.seed,
-          modality=self.modality,
+          weather=weather,
+          severity=s,
+          seed=seed,
+          modality=modality,
           clean_points=len(xyz),
           retained_points=int(keep.sum()),
           retained_fraction=float(keep.mean()) if len(keep) else 0.0,

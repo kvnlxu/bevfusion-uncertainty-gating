@@ -54,6 +54,18 @@ def parse_args():
       "--seed", type=int, default=42, help="Random seed for degradation"
   )
   parser.add_argument(
+      "--gate",
+      choices=["modality", "channel", "spatial"],
+      default=None,
+      help=(
+          "Replace ConvFuser with GatedConvFuser of this gate type (Phase 4). "
+          "Evaluate with a checkpoint trained by train_gate.py"
+      ),
+  )
+  parser.add_argument(
+      "--gate-hidden", type=int, default=64, help="Gate hidden width (default 64)"
+  )
+  parser.add_argument(
       "--camera-scale",
       type=float,
       default=1.0,
@@ -327,6 +339,17 @@ def main():
   resolved_dict = _resolve_all(raw_cfg)
   cfg = Config(resolved_dict)
   model_kind = _check_model(cfg)
+  if args.gate:
+    if model_kind != "fusion":
+      raise ValueError("--gate needs the camera+lidar fusion model")
+    fuser = cfg["model"]["fuser"]
+    cfg["model"]["fuser"] = dict(
+        type="GatedConvFuser",
+        in_channels=list(fuser["in_channels"]),
+        out_channels=int(fuser["out_channels"]),
+        gate_type=args.gate,
+        hidden_channels=int(args.gate_hidden),
+    )
   if args.camera_scale != 1.0:
     if model_kind != "fusion":
       raise ValueError("--camera-scale needs the camera+lidar fusion model")

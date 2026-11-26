@@ -24,6 +24,10 @@ Run from the repository root, e.g.:
   python tools/weather_eval/sweep.py --checkpoint pretrained/bevfusion-det.pth \
     --camera-scale 0 --weathers fog --severities 1.0 1.5 2.0 3.0
 
+  # A gated model trained by train_gate.py:
+  python tools/weather_eval/sweep.py --gate modality \
+    --checkpoint work_dirs/gate/modality/latest.pth --weathers fog --severities 1.0 2.0 3.0
+
   # Rebuild results.csv from existing runs without evaluating anything:
   python tools/weather_eval/sweep.py --collect-only
 """
@@ -47,7 +51,7 @@ BASE_CONFIGS = {
     "lidar": "configs/nuscenes/det/transfusion/secfpn/lidar/voxelnet_0p075.yaml",
 }
 CSV_FIELDS = (
-    ["model", "camera_scale", "weather", "severity", "modality", "seed", "mAP", "mAP_present", "NDS",
+    ["model", "camera_scale", "gate_w_cam", "gate_w_lidar", "weather", "severity", "modality", "seed", "mAP", "mAP_present", "NDS",
      "mATE", "mASE", "mAOE", "mAVE", "mAAE"]
     + [f"AP_{c}" for c in CLASSES]
     + ["num_samples", "dataset_version", "inference_seconds", "run_dir"]
@@ -72,6 +76,12 @@ def parse_args():
   p.add_argument("--modalities", nargs="+", default=["both"],
                  choices=["both", "camera", "lidar"])
   p.add_argument("--seeds", nargs="+", type=int, default=[42])
+  p.add_argument("--gate", choices=["modality", "channel", "spatial"], default=None,
+                 help="Evaluate a gated model (GatedConvFuser); pass the checkpoint "
+                      "written by train_gate.py. Run names get a gated_<type>_ prefix")
+  p.add_argument("--gate-hidden", type=int, default=64)
+  p.add_argument("--run-tag", default="",
+                 help="Extra run-name prefix, e.g. to tell two trained gates apart")
   p.add_argument("--camera-scale", type=float, default=1.0,
                  help="Scale camera BEV features before fusion (fusion model "
                       "only); 0 switches the camera off. Default 1.0")
@@ -89,10 +99,15 @@ def parse_args():
   return p.parse_args()
 
 
-def run_name(model, weather, severity, modality, seed, camera_scale=1.0):
+def run_name(model, weather, severity, modality, seed, camera_scale=1.0,
+             gate=None, tag=""):
   # Fusion runs at camera_scale 1 keep the original names so earlier results
   # are reused.
   prefix = "" if model == "fusion" else f"{model}only_"
+  if gate:
+    prefix = f"gated_{gate}_"
+  if tag:
+    prefix = f"{tag}_{prefix}"
   suffix = "" if camera_scale == 1.0 else f"_cam{round(camera_scale * 100):03d}"
   return (f"{prefix}{weather}_{round(severity * 100):03d}_{modality}"
           f"_s{seed}{suffix}")
@@ -123,7 +138,8 @@ def execute(args, runs):
   failed = []
   for i, (weather, sev, modality, seed) in enumerate(runs, 1):
     run_dir = Path(args.root) / run_name(
-        args.model, weather, sev, modality, seed, args.camera_scale)
+        args.model, weather, sev, modality, seed, args.camera_scale,
+        args.gate, args.run_tag)
     print(f"\n[{i}/{len(runs)}] {run_dir}", flush=True)
     if (REPO_ROOT / run_dir / "metrics.json").exists():
       print("  done already, skipping")
@@ -142,6 +158,8 @@ def execute(args, runs):
     gen += ["--base-config", args.base_config or BASE_CONFIGS[args.model]]
     if args.camera_scale != 1.0:
       gen += ["--camera-scale", str(args.camera_scale)]
+    if args.gate:
+      gen += ["--gate", args.gate, "--gate-hidden", str(args.gate_hidden)]
     ev = [
         sys.executable, str(HERE / "run_eval.py"),
         str(run_dir / "config.py"), args.checkpoint,
@@ -192,6 +210,8 @@ def collect(root):
     row = dict(
         model=rec.get("model", "fusion"),
         camera_scale=rec.get("camera_scale", 1.0),
+        gate_w_cam=rec.get("gate_w_cam"),
+        gate_w_lidar=rec.get("gate_w_lidar"),
         weather=rec.get("weather"),
         severity=rec.get("severity"),
         modality=rec.get("modality", "both"),
@@ -240,6 +260,8 @@ def main():
     bad = [s for s in args.severities if not 0 < s <= MAX_SEVERITY]
     if bad:
       sys.exit(f"Severities must be in (0, {MAX_SEVERITY}]: {bad}")
+    if args.model == "lidar" and args.gate:
+      sys.exit("--gate only applies to --model fusion")
     if args.model == "lidar" and args.camera_scale != 1.0:
       sys.exit("--camera-scale only applies to --model fusion")
     if args.model == "lidar" and "lidar" not in Path(args.checkpoint).name:
