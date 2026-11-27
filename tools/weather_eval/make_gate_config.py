@@ -54,6 +54,11 @@ def parse_args():
                       "training (teaches LiDAR fallback)")
   p.add_argument("--trainable", nargs="+", default=["fuser", "decoder"],
                  help="Top-level model modules to train; the rest are frozen")
+  p.add_argument("--freeze-gate", action="store_true",
+                 help="Control run: keep the gate fixed at its pass-through "
+                      "init (w = 1) and train only the fusion conv/BN and the "
+                      "decoder, with the same data and camera dropout. Shows how "
+                      "much of the effect comes from the gate itself")
   p.add_argument("--clean-prob", type=float, default=0.25,
                  help="Share of training samples left without weather")
   p.add_argument("--weathers", nargs="+", default=["fog", "rain", "snow"])
@@ -138,7 +143,13 @@ def main():
           list(cfg["data"][split]["pipeline"]), True)
 
   # Schedule: short fine-tune from the released checkpoint.
-  cfg.trainable_modules = list(args.trainable)
+  trainable = list(args.trainable)
+  if args.freeze_gate:
+    # ConvFuser children 0 (conv) and 1 (BN); the gate is fuser.gate.
+    trainable = [m for t in trainable
+                 for m in (["fuser.0", "fuser.1"] if t == "fuser" else [t])]
+  cfg.trainable_modules = trainable
+  cfg.gate_frozen = bool(args.freeze_gate)
   cfg.load_from = args.checkpoint
   cfg.resume_from = None
   cfg.max_epochs = args.epochs

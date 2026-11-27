@@ -63,6 +63,15 @@ def is_trainable(name, prefixes):
   return any(name == p or name.startswith(p + ".") for p in prefixes)
 
 
+def is_fully_frozen(module_name, prefixes):
+  """True if no trainable prefix lies inside or above this module."""
+  return not any(
+      p == module_name or p.startswith(module_name + ".")
+      or module_name.startswith(p + ".")
+      for p in prefixes
+  )
+
+
 @HOOKS.register_module(force=True)
 class FreezeHook(Hook):
   """Keep frozen top-level modules in eval mode during training.
@@ -77,7 +86,7 @@ class FreezeHook(Hook):
   def _apply(self, runner):
     model = runner.model.module if hasattr(runner.model, "module") else runner.model
     for name, module in model.named_children():
-      if not is_trainable(name, self.trainable):
+      if is_fully_frozen(name, self.trainable):
         module.eval()
 
   def before_train_epoch(self, runner):

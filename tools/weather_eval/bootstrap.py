@@ -89,11 +89,43 @@ POOLS = {
 }
 
 
+def gate_preset(prefix):
+  """Pairs and pools for a trained gate whose runs are named <prefix>...
+
+  Compares the gated model against the original fused model and the LiDAR-only
+  model, normally and with the camera switched off (sweep.py --camera-scale 0).
+  """
+  heavy = ["fog_150", "fog_200", "fog_250", "fog_300"]
+  off = ["fog_100", "fog_150", "fog_200", "fog_300"]
+  g = lambda w, cam="": f"{SWEEP}/{prefix}{w}_both_s42{cam}"
+  fused = lambda w, cam="": f"{SWEEP}/{w}_both_s42{cam}"
+  lidar = lambda w: f"{SWEEP}/lidaronly_{w}_lidar_s42"
+  pairs = (
+      [(g(w), fused(w)) for w in ["clean_000", "fog_100", *heavy]]
+      + [(g(w), lidar(w)) for w in ["clean_000", "fog_100", *heavy]]
+      + [(g(w, "_cam000"), lidar(w)) for w in ["clean_000", *off]]
+      + [(g(w, "_cam000"), fused(w, "_cam000")) for w in ["clean_000", *off]]
+  )
+  pools = [
+      ("gated vs fused, heavy fog 1.5-3.0", [(g(w), fused(w)) for w in heavy]),
+      ("gated vs LiDAR-only, heavy fog 1.5-3.0", [(g(w), lidar(w)) for w in heavy]),
+      ("gated camera-off vs LiDAR-only, fog 1.0-3.0 (success criterion a)",
+       [(g(w, "_cam000"), lidar(w)) for w in off]),
+      ("gated camera-off vs fused camera-off, fog 1.0-3.0",
+       [(g(w, "_cam000"), fused(w, "_cam000")) for w in off]),
+  ]
+  return pairs, pools
+
+
 def parse_args():
   p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
   p.add_argument("--pair", nargs=2, action="append", metavar=("RUN_A", "RUN_B"),
                  help="Two run directories to compare (repeatable)")
-  p.add_argument("--preset", choices=sorted(PRESETS), help="Named set of pairs")
+  p.add_argument("--preset", choices=sorted(PRESETS) + ["gate"],
+                 help="Named set of pairs. 'gate' compares a trained gate "
+                      "(runs named --gate-prefix...) with both baselines")
+  p.add_argument("--gate-prefix", default="gated_modality_",
+                 help="Run-name prefix of the gated model for --preset gate")
   p.add_argument("--pool", action="store_true",
                  help="Also test the mean difference over all --pair pairs")
   p.add_argument("--reps", type=int, default=2000, help="Bootstrap replicates")
@@ -277,7 +309,11 @@ def main():
   pools = []
   if args.pool and len(user_pairs) > 1:
     pools.append(("all --pair pairs", user_pairs))
-  if args.preset:
+  if args.preset == "gate":
+    gate_pairs, gate_pools = gate_preset(args.gate_prefix)
+    pairs += gate_pairs
+    pools += gate_pools
+  elif args.preset:
     pairs += PRESETS[args.preset]
     pools += POOLS.get(args.preset, [])
   if not pairs:
