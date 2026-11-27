@@ -301,6 +301,13 @@ class WeatherDegradation(object):
           and keep.all()
       )
 
+    # Record the applied condition; with "weather_cond" in Collect3D's
+    # meta_lis_keys it reaches the model, where GatedConvFuser derives a camera
+    # reliability target from it (supervised gate, Phase 4).
+    results["weather_cond"] = dict(
+        weather=weather, severity=float(s), modality=modality
+    )
+
     # BasePoints slicing preserves all channels, including sweep time and intensity.
     results["points"] = points[
         torch.as_tensor(keep, device=points.tensor.device)

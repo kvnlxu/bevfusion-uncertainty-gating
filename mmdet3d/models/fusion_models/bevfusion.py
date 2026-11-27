@@ -329,6 +329,10 @@ class BEVFusion(Base3DFusionModel):
             features = features[::-1]
 
         if self.fuser is not None:
+            # Fusers that use per-sample metadata (GatedConvFuser's supervised
+            # reliability loss) receive it here; other fusers are unaffected.
+            if hasattr(self.fuser, "set_metas"):
+                self.fuser.set_metas(metas)
             x = self.fuser(features)
         else:
             assert len(features) == 1, features
@@ -354,6 +358,8 @@ class BEVFusion(Base3DFusionModel):
                         outputs[f"loss/{type}/{name}"] = val * self.loss_scale[type]
                     else:
                         outputs[f"stats/{type}/{name}"] = val
+            for name, val in (getattr(self.fuser, "aux_losses", None) or {}).items():
+                outputs[f"loss/gate/{name}"] = val
             if self.use_depth_loss:
                 if 'depth' in auxiliary_losses:
                     outputs["loss/depth"] = auxiliary_losses['depth']

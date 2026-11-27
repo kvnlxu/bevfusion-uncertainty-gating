@@ -35,6 +35,16 @@ from make_weather_config import (  # noqa: E402
     _strip_bev_map,
 )
 
+# Collect3D's default meta_lis_keys (mmdet3d/datasets/pipelines/formating.py);
+# repeated here because setting the argument replaces the default.
+COLLECT3D_META_LIS_KEYS = [
+    "filename", "timestamp", "ori_shape", "img_shape", "lidar2image",
+    "depth2img", "cam2img", "pad_shape", "scale_factor", "flip",
+    "pcd_horizontal_flip", "pcd_vertical_flip", "box_mode_3d", "box_type_3d",
+    "img_norm_cfg", "pcd_trans", "token", "pcd_scale_factor", "pcd_rotation",
+    "lidar_path", "transformation_3d_flow",
+]
+
 
 def parse_args():
   p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -54,6 +64,11 @@ def parse_args():
                       "training (teaches LiDAR fallback)")
   p.add_argument("--trainable", nargs="+", default=["fuser", "decoder"],
                  help="Top-level model modules to train; the rest are frozen")
+  p.add_argument("--reliability-weight", type=float, default=0.0,
+                 help="Supervise the gate: weight of the auxiliary loss pulling "
+                      "the mean camera gate weight toward the known camera "
+                      "reliability (exp(-a*severity), 0 if dropped). 0 (default) "
+                      "= unsupervised gate; try 1.0")
   p.add_argument("--freeze-gate", action="store_true",
                  help="Control run: keep the gate fixed at its pass-through "
                       "init (w = 1) and train only the fusion conv/BN and the "
@@ -98,7 +113,10 @@ def main():
       gate_type=args.gate,
       hidden_channels=args.gate_hidden,
       camera_drop_prob=args.camera_drop_prob,
+      reliability_loss_weight=args.reliability_weight,
   )
+  if args.reliability_weight > 0 and args.freeze_gate:
+    sys.exit("--reliability-weight needs a trainable gate (drop --freeze-gate)")
 
   imports = dict(cfg.get("custom_imports") or {})
   names = imports.get("imports", [])
@@ -132,6 +150,15 @@ def main():
       ),
   )
   pipe.insert(_find_load_insert_idx(pipe), deg)
+  if args.reliability_weight > 0:
+    # Pass WeatherDegradation's per-sample condition through to the model.
+    for i, op in enumerate(pipe):
+      if _op_type(op) == "Collect3D":
+        op = dict(op)
+        op["meta_lis_keys"] = list(
+            dict.fromkeys([*op.get("meta_lis_keys", COLLECT3D_META_LIS_KEYS),
+                           "weather_cond"]))
+        pipe[i] = op
   train["pipeline"] = pipe
   cfg["data"]["train"] = train
   cfg["data"]["samples_per_gpu"] = args.samples_per_gpu

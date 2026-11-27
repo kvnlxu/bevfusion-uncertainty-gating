@@ -207,8 +207,21 @@ def collect(root):
     map_present = rec.get("mAP_present")
     if map_present is None and present and class_ap:
       map_present = sum(class_ap[c] for c in present) / len(present)
+    # A --run-tag prefix (e.g. "ctrl_gated_modality_...") is not stored in
+    # metrics.json; recover it from the run directory name so tagged runs of
+    # the same model stay distinguishable.
+    model = rec.get("model", "fusion")
+    name = run_dir.name
+    for marker in ("_gated_", "_lidaronly_"):
+      if marker in name:
+        model = f"{name.split(marker)[0]}:{model}"
+        break
+    else:
+      head = name.split("_")[0]
+      if head not in ("clean", "fog", "rain", "snow", "gated", "lidaronly"):
+        model = f"{head}:{model}"
     row = dict(
-        model=rec.get("model", "fusion"),
+        model=model,
         camera_scale=rec.get("camera_scale", 1.0),
         gate_w_cam=rec.get("gate_w_cam"),
         gate_w_lidar=rec.get("gate_w_lidar"),
