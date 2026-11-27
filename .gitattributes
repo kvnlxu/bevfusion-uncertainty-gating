@@ -1,0 +1,3 @@
+# Shell scripts run on the Linux pod: keep LF line endings even when
+# committed from Windows (CRLF breaks bash).
+*.sh text eol=lf
