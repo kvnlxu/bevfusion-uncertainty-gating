@@ -59,6 +59,24 @@ def parse_args():
   return parser.parse_args()
 
 
+def checkpoint_signature(path):
+  """(size, mtime) of the checkpoint file, following symlinks (latest.pth)."""
+  st = Path(path).resolve().stat()
+  return [int(st.st_size), int(st.st_mtime)]
+
+
+def is_up_to_date(metrics_path, checkpoint):
+  """True if metrics_path exists and was produced from this checkpoint file.
+
+  Runs recorded before signatures were stored count as up to date.
+  """
+  metrics_path = Path(metrics_path)
+  if not metrics_path.exists():
+    return False
+  recorded = json.loads(metrics_path.read_text()).get("checkpoint_signature")
+  return recorded is None or recorded == checkpoint_signature(checkpoint)
+
+
 def _weather_step(pipeline):
   for op in pipeline or []:
     if isinstance(op, dict) and op.get("type") == "WeatherDegradation":
@@ -92,9 +110,12 @@ def main():
   out_dir = Path(args.out_dir) if args.out_dir else cfg_path.parent
   out_dir.mkdir(parents=True, exist_ok=True)
   metrics_path = out_dir / "metrics.json"
-  if args.skip_existing and metrics_path.exists():
-    print(f"Skipping: {metrics_path} exists")
+  if not Path(args.checkpoint).exists():
+    raise SystemExit(f"Checkpoint not found: {args.checkpoint} (still training?)")
+  if args.skip_existing and is_up_to_date(metrics_path, args.checkpoint):
+    print(f"Skipping: {metrics_path} exists for this checkpoint")
     return
+  signature = checkpoint_signature(args.checkpoint)
 
   cfg = Config.fromfile(str(cfg_path))  # also runs cfg.custom_imports
   set_random_seed(args.seed)
@@ -170,6 +191,7 @@ def main():
   record = dict(
       config=str(cfg_path),
       checkpoint=str(args.checkpoint),
+      checkpoint_signature=signature,
       model=model_kind,
       camera_scale=camera_scale,
       gate_w_cam=(sum(w[0] for w in gate_weights) / len(gate_weights)

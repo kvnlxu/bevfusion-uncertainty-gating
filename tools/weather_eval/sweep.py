@@ -41,6 +41,28 @@ import sys
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 
+
+def checkpoint_signature(path):
+  """(size, mtime) of the checkpoint file, following symlinks (latest.pth).
+
+  Same as run_eval.checkpoint_signature (not imported: run_eval needs torch).
+  """
+  st = Path(path).resolve().stat()
+  return [int(st.st_size), int(st.st_mtime)]
+
+
+def is_up_to_date(metrics_path, checkpoint):
+  """True if metrics_path exists and was produced from this checkpoint file.
+
+  A run evaluated from an earlier file (e.g. latest.pth mid-training) is
+  re-run. Runs recorded before signatures were stored count as up to date.
+  """
+  metrics_path = Path(metrics_path)
+  if not metrics_path.exists():
+    return False
+  recorded = json.loads(metrics_path.read_text()).get("checkpoint_signature")
+  return recorded is None or recorded == checkpoint_signature(checkpoint)
+
 CLASSES = [
     "car", "truck", "construction_vehicle", "bus", "trailer",
     "barrier", "motorcycle", "bicycle", "pedestrian", "traffic_cone",
@@ -141,8 +163,9 @@ def execute(args, runs):
         args.model, weather, sev, modality, seed, args.camera_scale,
         args.gate, args.run_tag)
     print(f"\n[{i}/{len(runs)}] {run_dir}", flush=True)
-    if (REPO_ROOT / run_dir / "metrics.json").exists():
-      print("  done already, skipping")
+    if is_up_to_date(REPO_ROOT / run_dir / "metrics.json",
+                     REPO_ROOT / args.checkpoint):
+      print("  done already for this checkpoint, skipping")
       continue
     gen = [
         sys.executable, str(HERE / "make_weather_config.py"),
@@ -270,6 +293,10 @@ def main():
   if not args.collect_only:
     if not args.checkpoint:
       sys.exit("--checkpoint is required unless --collect-only is given")
+    if not (REPO_ROOT / args.checkpoint).exists():
+      sys.exit(f"Checkpoint not found: {args.checkpoint}. If it is being "
+               "trained, wait for 'Saving checkpoint at <last> epochs' in its "
+               "train.out before evaluating.")
     bad = [s for s in args.severities if not 0 < s <= MAX_SEVERITY]
     if bad:
       sys.exit(f"Severities must be in (0, {MAX_SEVERITY}]: {bad}")
