@@ -194,6 +194,13 @@ def main():
       for g in optimizer.param_groups
   ]
   assert sum(len(g["params"]) for g in optimizer.param_groups) == len(params)
+  lr_counts = {}
+  for g in optimizer.param_groups:
+    n = sum(p.numel() for p in g["params"])
+    if n:
+      lr_counts[g["lr"]] = lr_counts.get(g["lr"], 0) + n
+  logger.info("Learning rates: " + ", ".join(
+      f"{lr:g} for {n / 1e6:.3f}M params" for lr, n in sorted(lr_counts.items())))
 
   runner = build_runner(
       cfg.runner,

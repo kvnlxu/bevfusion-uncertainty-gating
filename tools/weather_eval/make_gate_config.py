@@ -69,6 +69,11 @@ def parse_args():
                       "the mean camera gate weight toward the known camera "
                       "reliability (exp(-a*severity), 0 if dropped). 0 (default) "
                       "= unsupervised gate; try 1.0")
+  p.add_argument("--gate-lr-mult", type=float, default=1.0,
+                 help="Learning-rate multiplier for the gate only (fuser.gate). "
+                      "The gate starts untrained while the decoder is already "
+                      "trained, so it needs a larger rate to learn in a short "
+                      "fine-tune; try 10. The decoder keeps --lr")
   p.add_argument("--freeze-gate", action="store_true",
                  help="Control run: keep the gate fixed at its pass-through "
                       "init (w = 1) and train only the fusion conv/BN and the "
@@ -182,6 +187,12 @@ def main():
   cfg.max_epochs = args.epochs
   cfg.runner = dict(type="CustomEpochBasedRunner", max_epochs=args.epochs)
   cfg.optimizer = dict(type="AdamW", lr=args.lr, weight_decay=args.weight_decay)
+  if args.gate_lr_mult != 1.0:
+    # mmcv's default optimizer constructor matches custom_keys as substrings of
+    # parameter names ("module.fuser.gate.0.weight"); the LR scheduler keeps
+    # each group's ratio to the base rate.
+    cfg["optimizer"]["paramwise_cfg"] = dict(
+        custom_keys={"fuser.gate": dict(lr_mult=args.gate_lr_mult)})
   cfg.optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
   cfg.lr_config = dict(
       policy="CosineAnnealing", warmup="linear",
@@ -198,6 +209,7 @@ def main():
   cfg.dump(str(out))
   print(f"Wrote {out}")
   print(f"Fuser: {cfg['model']['fuser']}")
+  print(f"Optimizer: {cfg.optimizer}")
   print(f"Trainable modules: {cfg.trainable_modules}; removed from train pipeline: "
         f"{removed or 'nothing'}")
   print(f"Train pipeline: {_op_names(pipe)}")
